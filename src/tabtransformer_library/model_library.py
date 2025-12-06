@@ -15,11 +15,7 @@ def build_tabtransformer_library(numeric_cols, categorical_cols, target_col="isF
     )
 
     model_config = TabTransformerConfig(
-        task="classification",
-        n_heads=4,
-        n_layers=2,
-        shared_embedding=True,
-        embedding_dim=32,
+        task="classification"
     )
 
     trainer_config = TrainerConfig(
@@ -29,8 +25,7 @@ def build_tabtransformer_library(numeric_cols, categorical_cols, target_col="isF
     )
 
     optimizer_config = OptimizerConfig(
-        optimizer="Adam",
-        lr=1e-4,
+        optimizer="Adam"
     )
 
     model = TabularModel(
