@@ -22,7 +22,6 @@ def build_tabtransformer_library(numeric_cols, categorical_cols, target_col="isF
         batch_size=1024,
         max_epochs=5,
         accelerator="cpu",
-        callbacks=[],
     )
 
     optimizer_config = OptimizerConfig(
