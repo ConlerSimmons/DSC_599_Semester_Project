@@ -1,11 +1,10 @@
 """
-Main script to run BOTH TabTransformer models:
+Main script to run TabTransformer model:
 
 1. Loads and merges IEEE-CIS fraud dataset
 2. Automatically selects numeric + categorical features
-3. Trains the TabTransformer (library version)
-4. Trains the TabTransformer (custom PyTorch version)
-5. Prints side-by-side performance metrics
+3. Trains the TabTransformer (custom PyTorch version)
+4. Prints performance metrics
 
 Run from project root:
 
