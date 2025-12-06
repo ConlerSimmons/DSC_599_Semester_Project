@@ -25,7 +25,6 @@ except Exception:
 
 from src.data_loading import load_merged_train
 from src.feature_selection import auto_select_features
-from src.tabtransformer_library.train_library import train_tabtransformer_library
 from src.tabtransformer_custom.train_custom import train_tabtransformer_custom
 
 
@@ -56,27 +55,17 @@ def main():
     )
 
     print("\n==============================")
-    print(" STEP 3: Training Library TabTransformer")
-    print("==============================")
-    lib_metrics, lib_model = train_tabtransformer_library(
-       df, numeric_cols, categorical_cols, target_col="isFraud"
-    )
-
-    print("\n==============================")
-    print(" STEP 4: Training Custom TabTransformer")
+    print(" STEP 3: Training Custom TabTransformer")
     print("==============================")
     custom_metrics, custom_model = train_tabtransformer_custom(
        df, numeric_cols, categorical_cols, target_col="isFraud"
     )
 
     print("\n==============================")
-    print(" STEP 5: Side-by-Side Comparison")
+    print(" Custom Model Metrics")
     print("==============================")
-    keys = ["precision", "recall", "f1", "pr_auc", "roc_auc"]
-    for k in keys:
-        lm = lib_metrics.get(k, float("nan"))
-        cm = custom_metrics.get(k, float("nan"))
-        print(f"{k:10s} | Library: {lm:.4f}   | Custom: {cm:.4f}")
+    for k, v in custom_metrics.items():
+        print(f"{k:10s} : {v:.4f}")
 
 
 if __name__ == "__main__":
