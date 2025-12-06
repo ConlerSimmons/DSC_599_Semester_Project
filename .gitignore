@@ -6,3 +6,4 @@ data/
 saved_models/
 lightning_logs/
 *.csv
+.pt_tmp/exp_version_manager.yml
