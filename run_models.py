@@ -37,6 +37,15 @@ def main():
     print("==============================")
     df = load_merged_train(data_dir="data")
 
+    # -------------------------------------------------
+    # DEBUG MODE: use a smaller subset for faster debugging
+    # -------------------------------------------------
+    DEBUG_MODE = True
+    if DEBUG_MODE:
+        df = df.sample(n=50000, random_state=42)
+        print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
+    # -------------------------------------------------
+
     print("\n==============================")
     print(" STEP 2: Feature Selection")
     print("==============================")
@@ -50,16 +59,16 @@ def main():
     print("\n==============================")
     print(" STEP 3: Training Library TabTransformer")
     print("==============================")
-    lib_metrics, lib_model = train_tabtransformer_library(
-        df, numeric_cols, categorical_cols, target_col="isFraud"
-    )
+    # lib_metrics, lib_model = train_tabtransformer_library(
+    #     df, numeric_cols, categorical_cols, target_col="isFraud"
+    # )
 
     print("\n==============================")
     print(" STEP 4: Training Custom TabTransformer")
     print("==============================")
-    custom_metrics, custom_model = train_tabtransformer_custom(
-        df, numeric_cols, categorical_cols, target_col="isFraud"
-    )
+    # custom_metrics, custom_model = train_tabtransformer_custom(
+    #     df, numeric_cols, categorical_cols, target_col="isFraud"
+    # )
 
     print("\n==============================")
     print(" STEP 5: Side-by-Side Comparison")
