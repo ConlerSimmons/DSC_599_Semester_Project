@@ -21,9 +21,7 @@ def build_tabtransformer_library(numeric_cols, categorical_cols, target_col="isF
     trainer_config = TrainerConfig(
         batch_size=1024,
         max_epochs=5,
-        accelerator="cpu",
-        enable_progress_bar=False,
-        callbacks=[],  # Disable RichProgressBar and any Lightning progress bars
+        accelerator="cpu"
     )
 
     optimizer_config = OptimizerConfig(
