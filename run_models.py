@@ -59,16 +59,16 @@ def main():
     print("\n==============================")
     print(" STEP 3: Training Library TabTransformer")
     print("==============================")
-    # lib_metrics, lib_model = train_tabtransformer_library(
-    #     df, numeric_cols, categorical_cols, target_col="isFraud"
-    # )
+    lib_metrics, lib_model = train_tabtransformer_library(
+       df, numeric_cols, categorical_cols, target_col="isFraud"
+    )
 
     print("\n==============================")
     print(" STEP 4: Training Custom TabTransformer")
     print("==============================")
-    # custom_metrics, custom_model = train_tabtransformer_custom(
-    #     df, numeric_cols, categorical_cols, target_col="isFraud"
-    # )
+    custom_metrics, custom_model = train_tabtransformer_custom(
+       df, numeric_cols, categorical_cols, target_col="isFraud"
+    )
 
     print("\n==============================")
     print(" STEP 5: Side-by-Side Comparison")
