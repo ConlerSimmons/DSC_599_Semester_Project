@@ -33,6 +33,7 @@ def build_tabtransformer_library(numeric_cols, categorical_cols, target_col="isF
         model_config=model_config,
         optimizer_config=optimizer_config,
         trainer_config=trainer_config,
+        callbacks=[],
     )
 
     return model
