@@ -67,26 +67,24 @@ def main():
     # target
     y = torch.tensor(df["isFraud"].values, dtype=torch.float32)
 
-    print("Tensor preparation complete.")
+print("Tensor preparation complete.")
 
-    print("\n==============================")
-    print(" STEP 3: Training Custom TabTransformer")
-    print("==============================")
+print("\n==============================")
+print(" STEP 3: Training Custom TabTransformer")
+print("==============================")
 
-    metrics, model, y_true, y_pred = train_tabtransformer_custom(
-        df,
-        numeric_cols,
-        categorical_cols,
-        target_col="isFraud",
-        device="cpu"
-    )
+metrics, model, y_true, y_pred = train_tabtransformer_custom(
+    df,
+    numeric_cols,
+    categorical_cols,
+    target_col="isFraud"
+)
 
-    print("\n==============================")
-    print(" Custom Model Metrics")
-    print("==============================")
-    for k, v in metrics.items():
-        print(f"{k:10s} : {v:.4f}")
-
+print("\n==============================")
+print(" Custom Model Metrics")
+print("==============================")
+for k, v in metrics.items():
+    print(f"{k:10s} : {v:.4f}")
     # -------------------------------
     # Confusion Matrix
     # -------------------------------
