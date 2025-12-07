@@ -67,6 +67,14 @@ def main():
     for k, v in custom_metrics.items():
         print(f"{k:10s} : {v:.4f}")
 
+    # === Confusion Matrix Visualization ===
+    if "confusion_matrix_fig" in custom_metrics:
+        print("\nDisplaying confusion matrix...")
+        fig = custom_metrics["confusion_matrix_fig"]
+        fig.show()
+    else:
+        print("\n(No confusion matrix figure was returned from the custom model.)")
+
 
 if __name__ == "__main__":
     main()
