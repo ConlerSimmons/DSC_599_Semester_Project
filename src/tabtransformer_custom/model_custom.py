@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from sklearn.metrics import confusion_matrix
-
+import matplotlib.pyplot as plt
+import numpy as np
 
 class CustomTabTransformer(nn.Module):
     """
@@ -126,8 +127,6 @@ def compute_confusion_matrix(y_true, y_pred_logits, threshold: float = 0.5):
 
     return cm
 
-import matplotlib.pyplot as plt
-import numpy as np
 
 def plot_confusion_matrix(cm, title="Confusion Matrix", cmap=plt.cm.Blues):
     """
