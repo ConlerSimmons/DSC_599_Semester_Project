@@ -16,7 +16,7 @@ import torch
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
 
-# Allow OmegaConf DictConfig objects to be unpickled safely with torch.load(weights_only=True)
+# Allow OmegaConf DictConfig objects to be safely unpickled
 try:
     from omegaconf.dictconfig import DictConfig
     if hasattr(torch.serialization, "add_safe_globals"):
@@ -36,14 +36,10 @@ def main():
     print("==============================")
     df = load_merged_train(data_dir="data")
 
-    # -------------------------------------------------
-    # DEBUG MODE: use a smaller subset for faster debugging
-    # -------------------------------------------------
     DEBUG_MODE = True
     if DEBUG_MODE:
         df = df.sample(n=5000, random_state=42)
         print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
-    # -------------------------------------------------
 
     print("\n==============================")
     print(" STEP 2: Feature Selection")
@@ -55,15 +51,12 @@ def main():
         max_categorical=20,
     )
 
-    # ======================================================
-    # Convert numeric + categorical + target → tensors
-    # ======================================================
     print("\nPreparing tensors...")
 
-    # --- numeric ---
-    X_num = torch.tensor(df[numeric_cols].fillna(0).values, dtype=torch.float)
+    # numeric
+    X_num = torch.tensor(df[numeric_cols].fillna(0).values, dtype=torch.float32)
 
-    # --- categorical: integer labels ---
+    # categorical
     X_cat = np.zeros((len(df), len(categorical_cols)), dtype=np.int64)
     for i, col in enumerate(categorical_cols):
         le = LabelEncoder()
@@ -71,44 +64,47 @@ def main():
 
     X_cat = torch.tensor(X_cat, dtype=torch.long)
 
-    # --- target ---
-    y = torch.tensor(df["isFraud"].values, dtype=torch.float)
+    # target
+    y = torch.tensor(df["isFraud"].values, dtype=torch.float32)
 
     print("Tensor preparation complete.")
 
     print("\n==============================")
     print(" STEP 3: Training Custom TabTransformer")
     print("==============================")
-    custom_metrics, custom_model = train_tabtransformer_custom(
-        X_num,
-        X_cat,
-        y
+
+    metrics, model, y_true, y_pred = train_tabtransformer_custom(
+        df,
+        numeric_cols,
+        categorical_cols,
+        target_col="isFraud",
+        device="cpu"
     )
 
     print("\n==============================")
     print(" Custom Model Metrics")
     print("==============================")
-    for k, v in custom_metrics.items():
-        if isinstance(v, (int, float)):
-            print(f"{k:10s} : {v:.4f}")
+    for k, v in metrics.items():
+        print(f"{k:10s} : {v:.4f}")
 
-    # =====================================================
-    # Confusion Matrix Visualization
-    # =====================================================
+    # -------------------------------
+    # Confusion Matrix
+    # -------------------------------
+    print("\n=== Confusion Matrix ===")
     try:
         from sklearn.metrics import confusion_matrix
         import matplotlib.pyplot as plt
-
-        y_true = custom_metrics.get("y_true")
-        y_pred = custom_metrics.get("y_pred")
-
-        print("\n=== Confusion Matrix ===")
+        import os
 
         if y_true is not None and y_pred is not None:
-            y_true = y_true.numpy()
-            y_pred = (y_pred.numpy() >= 0.5).astype(int)
-
             cm = confusion_matrix(y_true, y_pred)
+
+            # Print matrix text output
+            print(cm)
+
+            # Save visual figure
+            os.makedirs("confusion_matrices", exist_ok=True)
+            save_path = "confusion_matrices/confusion_matrix.png"
 
             fig, ax = plt.subplots(figsize=(4, 4))
             ax.imshow(cm, cmap="Blues")
@@ -121,10 +117,13 @@ def main():
                     ax.text(j, i, cm[i, j], ha="center", va="center")
 
             fig.tight_layout()
-            fig.show()
+            fig.savefig(save_path)
+            plt.close(fig)
+
+            print(f"Saved confusion matrix to: {save_path}")
 
         else:
-            print("Confusion matrix could not be computed — metrics missing y_true/y_pred.")
+            print("Confusion matrix could not be computed — missing y_true/y_pred.")
 
     except Exception as e:
         print(f"(Unable to compute confusion matrix: {e})")

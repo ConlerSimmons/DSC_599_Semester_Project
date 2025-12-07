@@ -41,14 +41,14 @@ class CustomTabTransformer(nn.Module):
             d_model=dim,
             nhead=heads,
             dropout=dropout,
-            batch_first=True,  # so we can use [batch, seq, dim]
+            batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
             num_layers=depth,
         )
 
-        # MLP head: takes pooled transformer output and outputs 1 logit
+        # MLP head → single fraud logit
         self.mlp_head = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, dim),
@@ -58,44 +58,29 @@ class CustomTabTransformer(nn.Module):
 
     def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
         """
-        x_num: [batch_size, num_numeric]       (float)
-        x_cat: [batch_size, num_categorical]   (long / int64)
+        x_num: [batch_size, num_numeric]
+        x_cat: [batch_size, num_categorical]
 
         Returns:
-            logits: [batch_size] (float) — unnormalized fraud scores
+            logits: [batch_size]
         """
 
-        # -----------------------------
         # 1) Embed categorical features
-        # -----------------------------
-        # x_cat: [B, num_categorical] -> [B, num_categorical, dim]
-        cat_emb = self.category_emb(x_cat)
+        cat_emb = self.category_emb(x_cat)  # [B, num_categorical, dim]
 
-        # -----------------------------
         # 2) Project numeric features
-        # -----------------------------
-        # x_num: [B, num_numeric] -> [B, 1, dim]
-        num_emb = self.numeric_proj(x_num).unsqueeze(1)
+        num_emb = self.numeric_proj(x_num).unsqueeze(1)  # [B, 1, dim]
 
-        # -----------------------------
-        # 3) Build sequence and run Transformer
-        # -----------------------------
-        # Sequence: [numeric_token] + [categorical_tokens]
-        # Shape: [B, 1 + num_categorical, dim]
+        # 3) Construct sequence: numeric token + categorical tokens
         seq = torch.cat([num_emb, cat_emb], dim=1)
 
-        # Transformer expects [B, seq_len, dim] when batch_first=True
+        # 4) Transformer encoder
         seq_out = self.transformer(seq)
 
-        # -----------------------------
-        # 4) Pool sequence representation
-        # -----------------------------
-        # Simple mean pooling over sequence length
-        pooled = seq_out.mean(dim=1)  # [B, dim]
+        # 5) Pool representations (mean pooling)
+        pooled = seq_out.mean(dim=1)
 
-        # -----------------------------
-        # 5) MLP head -> logit
-        # -----------------------------
-        logits = self.mlp_head(pooled).squeeze(-1)  # [B]
+        # 6) Output logits
+        logits = self.mlp_head(pooled).squeeze(-1)
 
         return logits

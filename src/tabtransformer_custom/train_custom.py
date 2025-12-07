@@ -1,104 +1,104 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from sklearn.metrics import (
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    average_precision_score,
-)
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, average_precision_score
 
-from .model_custom import CustomTabTransformer
+from src.tabtransformer_custom.model_custom import CustomTabTransformer
 
 
-def train_tabtransformer_custom(X_num, X_cat, y, num_epochs=5):
+def train_tabtransformer_custom(df, numeric_cols, categorical_cols, target_col, device="cpu"):
+    """
+    Trains the Custom TabTransformer on a subset of the dataset.
+    Returns:
+        metrics (dict), model, y_true_val (list), y_pred_val (list)
+    """
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device for custom model: {device}")
+    # ------------ Prepare data tensors ------------ #
+    x_num = torch.tensor(df[numeric_cols].values, dtype=torch.float32)
+    x_cat = torch.tensor(df[categorical_cols].values, dtype=torch.long)
+    y = torch.tensor(df[target_col].values, dtype=torch.float32)
 
-    # -----------------------------
-    # Train/validation split
-    # -----------------------------
-    total_rows = X_num.shape[0]
-    val_size = int(0.2 * total_rows)
-    train_size = total_rows - val_size
+    N = len(df)
+    train_size = int(0.8 * N)
+    val_size = N - train_size
 
-    X_num_train = X_num[:train_size].to(device)
-    X_cat_train = X_cat[:train_size].to(device)
-    y_train = y[:train_size].to(device)
+    x_num_train = x_num[:train_size]
+    x_cat_train = x_cat[:train_size]
+    y_train = y[:train_size]
 
-    X_num_val = X_num[train_size:].to(device)
-    X_cat_val = X_cat[train_size:].to(device)
-    y_val = y[train_size:].to(device)
+    x_num_val = x_num[train_size:]
+    x_cat_val = x_cat[train_size:]
+    y_val = y[train_size:]
+
+    # Dataset + loader
+    train_ds = TensorDataset(x_num_train, x_cat_train, y_train)
+    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
 
     print(f"Training size: {train_size}, Validation size: {val_size}")
 
-    # -----------------------------
-    # Handle class imbalance
-    # -----------------------------
-    fraud_ratio = y_train.sum() / len(y_train)
-    pos_weight = (1 - fraud_ratio) / fraud_ratio
-    pos_weight = pos_weight.item()
-    print(f"Class imbalance → pos_weight = {pos_weight:.2f}")
+    # ------------ Handle class imbalance ------------ #
+    num_pos = (y_train == 1).sum().item()
+    num_neg = (y_train == 0).sum().item()
+    pos_weight_value = (num_neg / max(num_pos, 1))
+    print(f"Class imbalance → pos_weight = {pos_weight_value:.2f}")
 
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
+    pos_weight = torch.tensor([pos_weight_value], device=device)
 
+    # ------------ Build model ------------ #
     model = CustomTabTransformer(
-        num_numeric=X_num.shape[1],
-        num_categories=X_cat.max().item() + 1,
-        num_categorical=X_cat.shape[1],
+        num_numeric=len(numeric_cols),
+        num_categories=500,            # large enough embedding table
+        num_categorical=len(categorical_cols),
         dim=64,
-        depth=4,
-        heads=8,
+        depth=3,
+        heads=4,
+        dropout=0.1,
     ).to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    # -----------------------------
-    # Training loop
-    # -----------------------------
-    for epoch in range(1, num_epochs + 1):
-        model.train()
-        optimizer.zero_grad()
+    # ------------ Training loop ------------ #
+    model.train()
+    for epoch in range(5):
+        total_loss = 0.0
 
-        logits = model(X_num_train, X_cat_train)
-        loss = criterion(logits.squeeze(), y_train)
+        for xb_num, xb_cat, yb in train_loader:
+            xb_num = xb_num.to(device)
+            xb_cat = xb_cat.to(device)
+            yb = yb.to(device)
 
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            logits = model(xb_num, xb_cat)
+            loss = criterion(logits, yb)
+            loss.backward()
+            optimizer.step()
 
-        print(f"[Custom Epoch {epoch}] loss={loss.item():.4f}")
+            total_loss += loss.item()
 
-    # -----------------------------
-    # Evaluation
-    # -----------------------------
+        print(f"[Custom Epoch {epoch+1}] loss={total_loss/len(train_loader):.4f}")
+
+    # ------------ Validation (predictions + metrics) ------------ #
     model.eval()
     with torch.no_grad():
-        logits_val = model(X_num_val, X_cat_val).squeeze()
-        prob_val = torch.sigmoid(logits_val)
+        logits_val = model(x_num_val.to(device), x_cat_val.to(device))
+        probs_val = torch.sigmoid(logits_val).cpu().numpy()
+        preds_val = (probs_val >= 0.5).astype(int)
+        y_true = y_val.cpu().numpy()
 
-    y_true = y_val.cpu()
-    y_pred_prob = prob_val.cpu()
-    y_pred = (y_pred_prob >= 0.5).int()
-
-    # -----------------------------
-    # Metrics
-    # -----------------------------
-    precision = precision_score(y_true, y_pred, zero_division=0)
-    recall = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
-    roc = roc_auc_score(y_true, y_pred_prob)
-    pr_auc = average_precision_score(y_true, y_pred_prob)
+    # ------------ Metrics ------------ #
+    precision = precision_score(y_true, preds_val, zero_division=0)
+    recall = recall_score(y_true, preds_val, zero_division=0)
+    f1 = f1_score(y_true, preds_val, zero_division=0)
+    roc_auc = roc_auc_score(y_true, probs_val) if len(set(y_true)) > 1 else 0.0
+    pr_auc = average_precision_score(y_true, probs_val)
 
     metrics = {
         "precision": precision,
         "recall": recall,
         "f1": f1,
-        "roc_auc": roc,
+        "roc_auc": roc_auc,
         "pr_auc": pr_auc,
-        "y_true": y_true,
-        "y_pred": y_pred_prob,  # return probabilities for confusion matrix
     }
 
-    return metrics, model
+    return metrics, model, y_true, preds_val
