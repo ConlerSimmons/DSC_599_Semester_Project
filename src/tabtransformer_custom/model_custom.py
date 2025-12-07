@@ -7,8 +7,6 @@ from sklearn.metrics import (
     average_precision_score,
     roc_auc_score,
 )
-from src.tabtransformer_custom.model_custom import CustomTabTransformer
-
 
 def train_tabtransformer_custom(
     X_num,
