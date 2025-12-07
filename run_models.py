@@ -38,7 +38,7 @@ def main():
     # -------------------------------------------------
     # DEBUG MODE: use a smaller subset for faster debugging
     # -------------------------------------------------
-    DEBUG_MODE = True
+    DEBUG_MODE = False
     if DEBUG_MODE:
         df = df.sample(n=5000, random_state=42)
         print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
