@@ -1,160 +1,159 @@
 import torch
-import torch.nn as nn
-from sklearn.metrics import confusion_matrix
-import matplotlib.pyplot as plt
-import numpy as np
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    average_precision_score,
+    roc_auc_score,
+)
+from src.tabtransformer_custom.model_custom import CustomTabTransformer
 
-class CustomTabTransformer(nn.Module):
+
+def train_tabtransformer_custom(
+    X_num,
+    X_cat,
+    y,
+    batch_size=64,
+    lr=1e-3,
+    num_epochs=5,
+    device=None,
+):
     """
-    A from-scratch TabTransformer-style model.
-
-    - Embeds each categorical column into a learned vector.
-    - Projects all numeric features into a single “numeric token”.
-    - Concatenates numeric token + categorical tokens into a sequence.
-    - Passes this sequence through a TransformerEncoder.
-    - Flattens and feeds to a classification head → fraud probability.
-    """
-
-    def __init__(
-        self,
-        vocab_sizes,
-        num_numeric_features,
-        d_token: int = 32,
-        n_heads: int = 4,
-        n_layers: int = 3,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-
-        self.num_numeric_features = num_numeric_features
-        self.vocab_sizes = vocab_sizes
-        self.d_token = d_token
-
-        # 1) Embedding layers for each categorical feature
-        self.cat_embeddings = nn.ModuleList([
-            nn.Embedding(n_cat, d_token) for n_cat in vocab_sizes
-        ])
-
-        # 2) One numeric token
-        self.num_linear = nn.Linear(num_numeric_features, d_token)
-
-        # Total token count = 1 numeric token + N categorical tokens
-        self.n_tokens = 1 + len(vocab_sizes)
-
-        # 3) Transformer encoder blocks
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_token,
-            nhead=n_heads,
-            dim_feedforward=4 * d_token,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=n_layers
-        )
-
-        # 4) Classification head
-        self.head = nn.Sequential(
-            nn.Linear(self.n_tokens * d_token, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 1),
-        )
-
-    def forward(self, x_num, x_cat):
-        """
-        x_num: (batch_size, num_numeric_features)
-        x_cat: (batch_size, num_categorical_features)
-        """
-        x_num = x_num.float()
-        x_cat = x_cat.long()
-        # Numeric token
-        num_token = self.num_linear(x_num).unsqueeze(1)
-
-        # Categorical tokens
-        cat_tokens = torch.stack(
-            [emb(x_cat[:, i]) for i, emb in enumerate(self.cat_embeddings)],
-            dim=1
-        )
-
-        # Sequence = [numeric_token] + [each categorical token]
-        tokens = torch.cat([num_token, cat_tokens], dim=1)
-
-        # Transformer encoder
-        encoded = self.transformer(tokens)
-
-        # Flatten
-        flat = encoded.reshape(encoded.size(0), -1)
-
-        # Classification head
-        logits = self.head(flat).squeeze(-1)
-        return logits
-
-def compute_confusion_matrix(y_true, y_pred_logits, threshold: float = 0.5):
-    """
-    Compute a confusion matrix given ground-truth labels and model logits.
-
-    Args:
-        y_true: 1D tensor or array of shape (N,) with binary labels {0, 1}.
-        y_pred_logits: 1D tensor or array of shape (N,) with raw logits from the model.
-        threshold: decision threshold applied to sigmoid(logits) to convert to predicted labels.
+    Train the custom TabTransformer model.
 
     Returns:
-        cm: 2x2 numpy array confusion matrix with rows = true labels, cols = predicted labels.
-             [[TN, FP],
-              [FN, TP]]
+        metrics: dict containing precision/recall/f1/pr_auc/roc_auc,
+                 AND y_true, y_pred (logits) for confusion matrix.
+        model:   trained model
     """
-    # Move tensors to CPU and convert to numpy if needed
-    if isinstance(y_true, torch.Tensor):
-        y_true_np = y_true.detach().cpu().numpy()
-    else:
-        y_true_np = y_true
 
-    if isinstance(y_pred_logits, torch.Tensor):
-        # Apply sigmoid to convert logits → probabilities
-        probs = torch.sigmoid(y_pred_logits)
-        y_pred_np = (probs.detach().cpu().numpy() >= 0.5).astype(int)
-    else:
-        raise ValueError("y_pred_logits should be a torch.Tensor of logits.")
+    # -------------------------------
+    # 1) Setup device
+    # -------------------------------
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device for custom model: {device}")
 
-    cm = confusion_matrix(y_true_np, y_pred_np, labels=[0, 1])
-    tn, fp, fn, tp = cm.ravel()
+    # -------------------------------
+    # 2) Train/Val split
+    # -------------------------------
+    N = len(y)
+    train_size = int(0.8 * N)
+    val_size = N - train_size
+    print(f"Training size: {train_size}, Validation size: {val_size}")
 
-    print("===== Confusion Matrix (threshold = 0.50) =====")
-    print(cm)
-    print(f"TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+    X_num_train = X_num[:train_size]
+    X_num_val = X_num[train_size:]
 
-    return cm
+    X_cat_train = X_cat[:train_size]
+    X_cat_val = X_cat[train_size:]
 
+    y_train = y[:train_size]
+    y_val = y[train_size:]
 
-def plot_confusion_matrix(cm, title="Confusion Matrix", cmap=plt.cm.Blues):
-    """
-    Plot a confusion matrix heatmap.
+    # -------------------------------
+    # 3) DataLoader setup
+    # -------------------------------
+    train_dataset = TensorDataset(X_num_train, X_cat_train, y_train)
+    val_dataset = TensorDataset(X_num_val, X_cat_val, y_val)
 
-    Args:
-        cm: 2x2 numpy array confusion matrix.
-        title: Plot title.
-        cmap: Colormap for heatmap.
-    """
-    plt.figure(figsize=(6, 5))
-    plt.imshow(cm, interpolation="nearest", cmap=cmap)
-    plt.title(title)
-    plt.colorbar()
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    tick_marks = np.arange(2)
-    plt.xticks(tick_marks, ["Pred 0", "Pred 1"])
-    plt.yticks(tick_marks, ["True 0", "True 1"])
+    # -------------------------------
+    # 4) Build model
+    # -------------------------------
+    vocab_sizes = [int(X_cat[:, i].max().item()) + 1 for i in range(X_cat.shape[1])]
+    model = CustomTabTransformer(
+        vocab_sizes=vocab_sizes,
+        num_numeric_features=X_num.shape[1],
+        d_token=32,
+        n_heads=4,
+        n_layers=3,
+        dropout=0.1,
+    ).to(device)
 
-    thresh = cm.max() / 2.
-    for i, j in np.ndindex(cm.shape):
-        plt.text(
-            j, i, format(cm[i, j], "d"),
-            ha="center", va="center",
-            color="white" if cm[i, j] > thresh else "black"
-        )
+    # -------------------------------
+    # 5) Loss + Optimizer
+    # -------------------------------
+    # Compute class imbalance weighting
+    pos_weight_value = (y_train == 0).sum() / (y_train == 1).sum()
+    print(f"Class imbalance → pos_weight = {pos_weight_value:.2f}")
 
-    plt.tight_layout()
-    plt.ylabel("True Label")
-    plt.xlabel("Predicted Label")
-    plt.show()
+    criterion = torch.nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(pos_weight_value, device=device)
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    # -------------------------------
+    # 6) Training Loop
+    # -------------------------------
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        total_loss = 0.0
+
+        for x_num_batch, x_cat_batch, y_batch in train_loader:
+            x_num_batch = x_num_batch.to(device).float()
+            x_cat_batch = x_cat_batch.to(device).long()
+            y_batch = y_batch.to(device).float()
+
+            optimizer.zero_grad()
+            logits = model(x_num_batch, x_cat_batch)
+            loss = criterion(logits, y_batch)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(train_loader)
+        print(f"[Custom Epoch {epoch}] loss={avg_loss:.4f}")
+
+    # -------------------------------
+    # 7) Validation — collect logits
+    # -------------------------------
+    model.eval()
+
+    y_true_list = []
+    y_pred_list = []
+
+    with torch.no_grad():
+        for x_num_batch, x_cat_batch, y_batch in val_loader:
+            x_num_batch = x_num_batch.to(device).float()
+            x_cat_batch = x_cat_batch.to(device).long()
+            y_batch = y_batch.to(device).float()
+
+            logits = model(x_num_batch, x_cat_batch)
+
+            y_true_list.append(y_batch)
+            y_pred_list.append(logits)
+
+    y_true = torch.cat(y_true_list, dim=0)
+    y_pred = torch.cat(y_pred_list, dim=0)
+
+    # -------------------------------
+    # 8) Convert predictions
+    # -------------------------------
+    y_true_np = y_true.cpu().numpy()
+    y_prob_np = torch.sigmoid(y_pred).cpu().numpy()
+    y_pred_labels = (y_prob_np >= 0.5).astype(int)
+
+    # -------------------------------
+    # 9) Compute Metrics
+    # -------------------------------
+    precision = precision_score(y_true_np, y_pred_labels, zero_division=0)
+    recall = recall_score(y_true_np, y_pred_labels, zero_division=0)
+    f1 = f1_score(y_true_np, y_pred_labels, zero_division=0)
+    pr_auc = average_precision_score(y_true_np, y_prob_np)
+    roc_auc = roc_auc_score(y_true_np, y_prob_np)
+
+    metrics = {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "pr_auc": pr_auc,
+        "roc_auc": roc_auc,
+        "y_true": y_true,     # needed for confusion matrix
+        "y_pred": y_pred,     # logits
+    }
+
+    return metrics, model
