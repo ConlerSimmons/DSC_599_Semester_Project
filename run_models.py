@@ -69,11 +69,41 @@ def main():
 
     # === Confusion Matrix Visualization ===
     if "confusion_matrix_fig" in custom_metrics:
-        print("\nDisplaying confusion matrix...")
+        print("\n=== Confusion Matrix ===")
         fig = custom_metrics["confusion_matrix_fig"]
         fig.show()
     else:
-        print("\n(No confusion matrix figure was returned from the custom model.)")
+        # Compute matrix manually if not returned
+        try:
+            from sklearn.metrics import confusion_matrix
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            print("\nComputing confusion matrix manually...")
+
+            y_true = custom_metrics.get("y_true")
+            y_pred = custom_metrics.get("y_pred")
+
+            if y_true is not None and y_pred is not None:
+                cm = confusion_matrix(y_true, y_pred)
+
+                fig, ax = plt.subplots(figsize=(4, 4))
+                ax.imshow(cm, cmap="Blues")
+                ax.set_title("Confusion Matrix")
+                ax.set_xlabel("Predicted Label")
+                ax.set_ylabel("True Label")
+
+                for i in range(cm.shape[0]):
+                    for j in range(cm.shape[1]):
+                        ax.text(j, i, cm[i, j], ha="center", va="center")
+
+                fig.tight_layout()
+                fig.show()
+            else:
+                print("Confusion matrix could not be computed (y_true/y_pred missing).")
+
+        except Exception as e:
+            print(f"(Unable to compute confusion matrix manually: {e})")
 
 
 if __name__ == "__main__":

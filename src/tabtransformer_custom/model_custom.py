@@ -114,14 +114,14 @@ def compute_confusion_matrix(y_true, y_pred_logits, threshold: float = 0.5):
     if isinstance(y_pred_logits, torch.Tensor):
         # Apply sigmoid to convert logits → probabilities
         probs = torch.sigmoid(y_pred_logits)
-        y_pred_np = (probs.detach().cpu().numpy() >= threshold).astype(int)
+        y_pred_np = (probs.detach().cpu().numpy() >= 0.5).astype(int)
     else:
         raise ValueError("y_pred_logits should be a torch.Tensor of logits.")
 
     cm = confusion_matrix(y_true_np, y_pred_np, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
 
-    print("===== Confusion Matrix (threshold = {:.2f}) =====".format(threshold))
+    print("===== Confusion Matrix (threshold = 0.50) =====")
     print(cm)
     print(f"TN={tn}, FP={fp}, FN={fn}, TP={tp}")
 
