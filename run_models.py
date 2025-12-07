@@ -19,8 +19,7 @@ try:
     if hasattr(torch.serialization, "add_safe_globals"):
         torch.serialization.add_safe_globals([DictConfig])
 except Exception:
-    # If anything goes wrong here (older torch, missing omegaconf, etc.),
-    # I just skip the extra registration so the script still runs.
+    # Fail‑safe: skip registration if something is missing
     pass
 
 from src.data_loading import load_merged_train
@@ -36,7 +35,7 @@ def main():
     df = load_merged_train(data_dir="data")
 
     # -------------------------------------------------
-    # DEBUG MODE: use a smaller subset for faster debugging
+    # DEBUG MODE (set to False for full training)
     # -------------------------------------------------
     DEBUG_MODE = False
     if DEBUG_MODE:
@@ -57,7 +56,9 @@ def main():
     print("\n==============================")
     print(" STEP 3: Training Custom TabTransformer")
     print("==============================")
-    custom_metrics, custom_model, y_true, y_pred = train_tabtransformer_custom(
+
+    # Only two return values (metrics, model) — matches the current training function
+    custom_metrics, custom_model = train_tabtransformer_custom(
         df, numeric_cols, categorical_cols, target_col="isFraud"
     )
 
@@ -66,20 +67,6 @@ def main():
     print("==============================")
     for k, v in custom_metrics.items():
         print(f"{k:10s} : {v:.4f}")
-
-    # ----------------------------------------
-    # CONFUSION MATRIX
-    # ----------------------------------------
-    from sklearn.metrics import confusion_matrix
-
-    print("\n=== Confusion Matrix ===")
-    try:
-        cm = confusion_matrix(y_true, y_pred)
-        print(cm)
-    except Exception as e:
-        print("Could not compute confusion matrix:", e)
-        for k, v in custom_metrics.items():
-            print(f"{k:10s} : {v:.4f}")
 
 
 if __name__ == "__main__":
