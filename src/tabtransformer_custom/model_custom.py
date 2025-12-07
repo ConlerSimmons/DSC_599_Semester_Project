@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from sklearn.metrics import confusion_matrix
 
 
 class CustomTabTransformer(nn.Module):
@@ -88,3 +89,39 @@ class CustomTabTransformer(nn.Module):
         # Classification head
         logits = self.head(flat).squeeze(-1)
         return logits
+
+def compute_confusion_matrix(y_true, y_pred_logits, threshold: float = 0.5):
+    """
+    Compute a confusion matrix given ground-truth labels and model logits.
+
+    Args:
+        y_true: 1D tensor or array of shape (N,) with binary labels {0, 1}.
+        y_pred_logits: 1D tensor or array of shape (N,) with raw logits from the model.
+        threshold: decision threshold applied to sigmoid(logits) to convert to predicted labels.
+
+    Returns:
+        cm: 2x2 numpy array confusion matrix with rows = true labels, cols = predicted labels.
+             [[TN, FP],
+              [FN, TP]]
+    """
+    # Move tensors to CPU and convert to numpy if needed
+    if isinstance(y_true, torch.Tensor):
+        y_true_np = y_true.detach().cpu().numpy()
+    else:
+        y_true_np = y_true
+
+    if isinstance(y_pred_logits, torch.Tensor):
+        # Apply sigmoid to convert logits → probabilities
+        probs = torch.sigmoid(y_pred_logits)
+        y_pred_np = (probs.detach().cpu().numpy() >= threshold).astype(int)
+    else:
+        raise ValueError("y_pred_logits should be a torch.Tensor of logits.")
+
+    cm = confusion_matrix(y_true_np, y_pred_np, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+
+    print("===== Confusion Matrix (threshold = {:.2f}) =====".format(threshold))
+    print(cm)
+    print(f"TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+
+    return cm
