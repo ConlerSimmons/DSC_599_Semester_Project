@@ -3,8 +3,9 @@ Main script to run TabTransformer model:
 
 1. Loads and merges IEEE-CIS fraud dataset
 2. Automatically selects numeric + categorical features
-3. Trains the TabTransformer (custom PyTorch version)
-4. Prints performance metrics
+3. Converts data into tensors
+4. Trains the TabTransformer (custom PyTorch version)
+5. Prints performance metrics + confusion matrix
 
 Run from project root:
 
@@ -12,6 +13,8 @@ Run from project root:
 """
 
 import torch
+import numpy as np
+from sklearn.preprocessing import LabelEncoder
 
 # Allow OmegaConf DictConfig objects to be unpickled safely with torch.load(weights_only=True)
 try:
@@ -19,8 +22,6 @@ try:
     if hasattr(torch.serialization, "add_safe_globals"):
         torch.serialization.add_safe_globals([DictConfig])
 except Exception:
-    # If anything goes wrong here (older torch, missing omegaconf, etc.),
-    # I just skip the extra registration so the script still runs.
     pass
 
 from src.data_loading import load_merged_train
@@ -54,56 +55,79 @@ def main():
         max_categorical=20,
     )
 
+    # ======================================================
+    # Convert numeric + categorical + target → tensors
+    # ======================================================
+    print("\nPreparing tensors...")
+
+    # --- numeric ---
+    X_num = torch.tensor(df[numeric_cols].fillna(0).values, dtype=torch.float)
+
+    # --- categorical: integer labels ---
+    X_cat = np.zeros((len(df), len(categorical_cols)), dtype=np.int64)
+    for i, col in enumerate(categorical_cols):
+        le = LabelEncoder()
+        X_cat[:, i] = le.fit_transform(df[col].astype(str))
+
+    X_cat = torch.tensor(X_cat, dtype=torch.long)
+
+    # --- target ---
+    y = torch.tensor(df["isFraud"].values, dtype=torch.float)
+
+    print("Tensor preparation complete.")
+
     print("\n==============================")
     print(" STEP 3: Training Custom TabTransformer")
     print("==============================")
     custom_metrics, custom_model = train_tabtransformer_custom(
-       df, numeric_cols, categorical_cols, target_col="isFraud"
+        X_num,
+        X_cat,
+        y
     )
 
     print("\n==============================")
     print(" Custom Model Metrics")
     print("==============================")
     for k, v in custom_metrics.items():
-        print(f"{k:10s} : {v:.4f}")
+        if isinstance(v, (int, float)):
+            print(f"{k:10s} : {v:.4f}")
 
-    # === Confusion Matrix Visualization ===
-    if "confusion_matrix_fig" in custom_metrics:
+    # =====================================================
+    # Confusion Matrix Visualization
+    # =====================================================
+    try:
+        from sklearn.metrics import confusion_matrix
+        import matplotlib.pyplot as plt
+
+        y_true = custom_metrics.get("y_true")
+        y_pred = custom_metrics.get("y_pred")
+
         print("\n=== Confusion Matrix ===")
-        fig = custom_metrics["confusion_matrix_fig"]
-        fig.show()
-    else:
-        # Compute matrix manually if not returned
-        try:
-            from sklearn.metrics import confusion_matrix
-            import matplotlib.pyplot as plt
-            import numpy as np
 
-            print("\nComputing confusion matrix manually...")
+        if y_true is not None and y_pred is not None:
+            y_true = y_true.numpy()
+            y_pred = (y_pred.numpy() >= 0.5).astype(int)
 
-            y_true = custom_metrics.get("y_true")
-            y_pred = custom_metrics.get("y_pred")
+            cm = confusion_matrix(y_true, y_pred)
 
-            if y_true is not None and y_pred is not None:
-                cm = confusion_matrix(y_true, y_pred)
+            fig, ax = plt.subplots(figsize=(4, 4))
+            ax.imshow(cm, cmap="Blues")
+            ax.set_title("Confusion Matrix")
+            ax.set_xlabel("Predicted Label")
+            ax.set_ylabel("True Label")
 
-                fig, ax = plt.subplots(figsize=(4, 4))
-                ax.imshow(cm, cmap="Blues")
-                ax.set_title("Confusion Matrix")
-                ax.set_xlabel("Predicted Label")
-                ax.set_ylabel("True Label")
+            for i in range(cm.shape[0]):
+                for j in range(cm.shape[1]):
+                    ax.text(j, i, cm[i, j], ha="center", va="center")
 
-                for i in range(cm.shape[0]):
-                    for j in range(cm.shape[1]):
-                        ax.text(j, i, cm[i, j], ha="center", va="center")
+            fig.tight_layout()
+            fig.show()
 
-                fig.tight_layout()
-                fig.show()
-            else:
-                print("Confusion matrix could not be computed (y_true/y_pred missing).")
+        else:
+            print("Confusion matrix could not be computed — metrics missing y_true/y_pred.")
 
-        except Exception as e:
-            print(f"(Unable to compute confusion matrix manually: {e})")
+    except Exception as e:
+        print(f"(Unable to compute confusion matrix: {e})")
 
 
 if __name__ == "__main__":
