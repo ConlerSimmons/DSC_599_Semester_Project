@@ -1,183 +1,104 @@
-import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
+import torch.optim as optim
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    average_precision_score,
+)
 
-from src.utils_metrics import compute_metrics, print_metrics
-from src.tabtransformer_custom.model_custom import CustomTabTransformer
-
-
-class FraudDataset(Dataset):
-    """
-    A simple PyTorch Dataset that stores:
-    - numeric features (X_num)
-    - categorical features (X_cat)
-    - labels (y)
-    """
-
-    def __init__(self, X_num, X_cat, y):
-        self.X_num = X_num
-        self.X_cat = X_cat
-        self.y = y
-
-    def __len__(self):
-        return len(self.y)
-
-    def __getitem__(self, idx):
-        return (
-            torch.tensor(self.X_num[idx], dtype=torch.float32),
-            torch.tensor(self.X_cat[idx], dtype=torch.long),
-            torch.tensor(self.y[idx], dtype=torch.long),
-        )
+from .model_custom import CustomTabTransformer
 
 
-def train_tabtransformer_custom(
-    df,
-    numeric_cols,
-    categorical_cols,
-    target_col: str = "isFraud",
-    device: str = None,
-):
-    """
-    Train the custom TabTransformer:
-    - preprocess df
-    - encode categoricals
-    - standard train/val split
-    - class-weighted loss (handles fraud imbalance)
-    - custom transformer training
-    - evaluation + metrics
-    """
+def train_tabtransformer_custom(X_num, X_cat, y, num_epochs=5):
 
-    # ---------------------------
-    # DEVICE SETUP
-    # ---------------------------
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device for custom model: {device}")
 
-    # ---------------------------
-    # SELECT COLUMNS
-    # ---------------------------
-    df = df[numeric_cols + categorical_cols + [target_col]].copy()
+    # -----------------------------
+    # Train/validation split
+    # -----------------------------
+    total_rows = X_num.shape[0]
+    val_size = int(0.2 * total_rows)
+    train_size = total_rows - val_size
 
-    # ---------------------------
-    # IMPUTE NUMERICAL FEATURES
-    # ---------------------------
-    for col in numeric_cols:
-        df[col] = df[col].fillna(df[col].median())
+    X_num_train = X_num[:train_size].to(device)
+    X_cat_train = X_cat[:train_size].to(device)
+    y_train = y[:train_size].to(device)
 
-    # ---------------------------
-    # ENCODE CATEGORICAL FEATURES
-    # ---------------------------
-    vocab_sizes = []
-    for col in categorical_cols:
-        df[col] = df[col].astype("object").fillna("missing").astype("category")
-        vocab_sizes.append(df[col].cat.categories.size)
-        df[col] = df[col].cat.codes
+    X_num_val = X_num[train_size:].to(device)
+    X_cat_val = X_cat[train_size:].to(device)
+    y_val = y[train_size:].to(device)
 
-    # Convert df → numpy
-    X_num = df[numeric_cols].to_numpy().astype("float32")
-    X_cat = df[categorical_cols].to_numpy().astype("int64")
-    y = df[target_col].to_numpy().astype("int64")
+    print(f"Training size: {train_size}, Validation size: {val_size}")
 
-    # ---------------------------
-    # TRAIN/VAL SPLIT
-    # ---------------------------
-    (
-        X_num_train, X_num_val,
-        X_cat_train, X_cat_val,
-        y_train, y_val
-    ) = train_test_split(
-        X_num, X_cat, y,
-        test_size=0.2,
-        stratify=y,
-        random_state=42
-    )
+    # -----------------------------
+    # Handle class imbalance
+    # -----------------------------
+    fraud_ratio = y_train.sum() / len(y_train)
+    pos_weight = (1 - fraud_ratio) / fraud_ratio
+    pos_weight = pos_weight.item()
+    print(f"Class imbalance → pos_weight = {pos_weight:.2f}")
 
-    # ---------------------------
-    # DATALOADERS
-    # ---------------------------
-    train_loader = DataLoader(
-        FraudDataset(X_num_train, X_cat_train, y_train),
-        batch_size=2048,
-        shuffle=True,
-    )
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
 
-    val_loader = DataLoader(
-        FraudDataset(X_num_val, X_cat_val, y_val),
-        batch_size=2048,
-        shuffle=False,
-    )
-
-    # ---------------------------
-    # MODEL INITIALIZATION
-    # ---------------------------
     model = CustomTabTransformer(
-        vocab_sizes=vocab_sizes,
-        num_numeric_features=len(numeric_cols),
+        num_numeric=X_num.shape[1],
+        num_categories=X_cat.max().item() + 1,
+        num_categorical=X_cat.shape[1],
+        dim=64,
+        depth=4,
+        heads=8,
     ).to(device)
 
-    # ---------------------------
-    # CLASS-WEIGHTED LOSS
-    # ---------------------------
-    n_pos = (y_train == 1).sum()
-    n_neg = (y_train == 0).sum()
-    pos_weight_val = n_neg / max(n_pos, 1)  # avoid divide-by-zero
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    pos_weight = torch.tensor([pos_weight_val], dtype=torch.float32, device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-
-    print(f"Training size: {len(y_train)}, Validation size: {len(y_val)}")
-    print(f"Class imbalance → pos_weight = {pos_weight_val:.2f}")
-
-    # ---------------------------
-    # TRAINING LOOP
-    # ---------------------------
-    for epoch in range(5):  # small number for initial test
+    # -----------------------------
+    # Training loop
+    # -----------------------------
+    for epoch in range(1, num_epochs + 1):
         model.train()
-        total_loss = 0.0
+        optimizer.zero_grad()
 
-        for Xn, Xc, yy in train_loader:
-            Xn = Xn.to(device)
-            Xc = Xc.to(device)
-            yy = yy.float().to(device)
+        logits = model(X_num_train, X_cat_train)
+        loss = criterion(logits.squeeze(), y_train)
 
-            optimizer.zero_grad()
-            logits = model(Xn, Xc)
-            loss = criterion(logits, yy)
-            loss.backward()
-            optimizer.step()
+        loss.backward()
+        optimizer.step()
 
-            total_loss += loss.item() * yy.size(0)
+        print(f"[Custom Epoch {epoch}] loss={loss.item():.4f}")
 
-        avg_loss = total_loss / len(train_loader.dataset)
-        print(f"[Custom Epoch {epoch+1}] loss={avg_loss:.4f}")
-
-    # ---------------------------
-    # EVALUATION
-    # ---------------------------
+    # -----------------------------
+    # Evaluation
+    # -----------------------------
     model.eval()
-    all_logits = []
-    all_labels = []
-
     with torch.no_grad():
-        for Xn, Xc, yy in val_loader:
-            Xn = Xn.to(device)
-            Xc = Xc.to(device)
+        logits_val = model(X_num_val, X_cat_val).squeeze()
+        prob_val = torch.sigmoid(logits_val)
 
-            logits = model(Xn, Xc)
-            all_logits.append(logits.cpu().numpy())
-            all_labels.append(yy.numpy())
+    y_true = y_val.cpu()
+    y_pred_prob = prob_val.cpu()
+    y_pred = (y_pred_prob >= 0.5).int()
 
-    y_proba = 1 / (1 + np.exp(-np.concatenate(all_logits)))
-    y_true = np.concatenate(all_labels)
+    # -----------------------------
+    # Metrics
+    # -----------------------------
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    roc = roc_auc_score(y_true, y_pred_prob)
+    pr_auc = average_precision_score(y_true, y_pred_prob)
 
-    # ---------------------------
-    # METRICS
-    # ---------------------------
-    metrics = compute_metrics(y_true, y_proba)
-    print_metrics("Custom TabTransformer", metrics)
+    metrics = {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "roc_auc": roc,
+        "pr_auc": pr_auc,
+        "y_true": y_true,
+        "y_pred": y_pred_prob,  # return probabilities for confusion matrix
+    }
 
     return metrics, model
