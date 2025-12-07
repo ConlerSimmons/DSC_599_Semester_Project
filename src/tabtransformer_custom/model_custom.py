@@ -125,3 +125,37 @@ def compute_confusion_matrix(y_true, y_pred_logits, threshold: float = 0.5):
     print(f"TN={tn}, FP={fp}, FN={fn}, TP={tp}")
 
     return cm
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+def plot_confusion_matrix(cm, title="Confusion Matrix", cmap=plt.cm.Blues):
+    """
+    Plot a confusion matrix heatmap.
+
+    Args:
+        cm: 2x2 numpy array confusion matrix.
+        title: Plot title.
+        cmap: Colormap for heatmap.
+    """
+    plt.figure(figsize=(6, 5))
+    plt.imshow(cm, interpolation="nearest", cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+
+    tick_marks = np.arange(2)
+    plt.xticks(tick_marks, ["Pred 0", "Pred 1"])
+    plt.yticks(tick_marks, ["True 0", "True 1"])
+
+    thresh = cm.max() / 2.
+    for i, j in np.ndindex(cm.shape):
+        plt.text(
+            j, i, format(cm[i, j], "d"),
+            ha="center", va="center",
+            color="white" if cm[i, j] > thresh else "black"
+        )
+
+    plt.tight_layout()
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+    plt.show()
