@@ -1,100 +1,57 @@
-from typing import Optional
-import pandas as pd
 import torch
+import numpy as np
+from sklearn.neighbors import NearestNeighbors
 
 
-def build_edge_index_from_key(
-    df: pd.DataFrame,
-    key_col: str = "card1",
-    add_reverse: bool = True,
-    max_nodes: Optional[int] = None,
-) -> torch.Tensor:
+def build_transaction_graph(df, numeric_cols, k_neighbors=5):
     """
-    Build a simple transaction graph by connecting rows that share
-    the same value in `key_col` (e.g., same card1).
+    Build a simple k-NN graph over transactions using numeric features.
 
-    For each group with at least 2 rows, I chain them:
-        (i -> i+1) and optionally (i+1 -> i) to make it undirected.
+    - Nodes: each transaction (row in df)
+    - Edges: undirected edges between k nearest neighbours in numeric space
 
-    Args:
-        df: Pandas DataFrame with at least the key_col present.
-        key_col: Column name used to group transactions into nodes that
-                 should be connected (e.g., "card1").
-        add_reverse: If True, for every edge (a, b) also add (b, a).
-        max_nodes: If provided, I only allow node indices in
-                   range [0, max_nodes). This is important when we
-                   only use a prefix of df as nodes (e.g., train split)
-                   but df has more rows.
-
-    Returns:
-        edge_index: LongTensor of shape [2, E] with valid node indices.
+    Returns
+    -------
+    edge_index : LongTensor of shape (2, E)
+        edge_index[0] = source node indices
+        edge_index[1] = destination node indices
     """
-    # Ensure a clean, 0-based index
+    # Make sure the index is 0..N-1 so row positions match node ids
     df = df.reset_index(drop=True)
+    num_nodes = len(df)
 
-    # Effective upper bound for valid node indices
-    if max_nodes is None:
-        valid_len = len(df)
+    if num_nodes == 0:
+        raise ValueError("build_transaction_graph: dataframe is empty")
+
+    # Use numeric features to define similarity
+    X = df[numeric_cols].fillna(0.0).values.astype("float32")
+
+    # We ask for k+1 neighbors because the closest neighbor is the point itself
+    k = min(k_neighbors + 1, num_nodes)
+
+    nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
+    nn.fit(X)
+    distances, indices = nn.kneighbors(X)
+
+    src_list = []
+    dst_list = []
+
+    for i in range(num_nodes):
+        for j in indices[i]:
+            if i == j:
+                # skip self-loop; we can always add them later if we want
+                continue
+            # add edge i -> j
+            src_list.append(i)
+            dst_list.append(j)
+            # and j -> i to make it undirected
+            src_list.append(j)
+            dst_list.append(i)
+
+    if not src_list:
+        # fallback: no neighbors found (degenerate tiny case)
+        edge_index = torch.empty((2, 0), dtype=torch.long)
     else:
-        valid_len = min(max_nodes, len(df))
+        edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
 
-    # Group rows by the key_col; .indices maps key -> array of row indices
-    groups = df.groupby(key_col).indices
-    edges = []
-
-    for idxs in groups.values():
-        # Ignore groups with fewer than 2 nodes
-        if len(idxs) < 2:
-            continue
-
-        # Convert to list and enforce bounds [0, valid_len)
-        idxs = [int(i) for i in idxs if 0 <= int(i) < valid_len]
-        if len(idxs) < 2:
-            continue
-
-        # Chain consecutive indices in this group
-        for i in range(len(idxs) - 1):
-            a = idxs[i]
-            b = idxs[i + 1]
-
-            # Double-check bounds to be safe
-            if 0 <= a < valid_len and 0 <= b < valid_len:
-                edges.append((a, b))
-                if add_reverse:
-                    edges.append((b, a))
-
-    if not edges:
-        # Fallback: only self-loops so the model still runs,
-        # even if no edges were found.
-        n = valid_len
-        idx = torch.arange(n, dtype=torch.long)
-        return torch.stack([idx, idx], dim=0)
-
-    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
     return edge_index
-
-
-def add_self_loops(
-    edge_index: torch.Tensor,
-    num_nodes: int,
-    device: Optional[torch.device] = None,
-) -> torch.Tensor:
-    """
-    Add self-loops to an existing edge_index so that every node
-    preserves some of its own signal each GNN layer.
-
-    Args:
-        edge_index: LongTensor of shape [2, E].
-        num_nodes: Total number of nodes.
-        device: Optional device override; if None, I use edge_index.device.
-
-    Returns:
-        edge_index_with_loops: LongTensor of shape [2, E + num_nodes].
-    """
-    if device is None:
-        device = edge_index.device
-
-    self_nodes = torch.arange(num_nodes, device=device)
-    self_loops = torch.stack([self_nodes, self_nodes], dim=0)  # [2, N]
-
-    return torch.cat([edge_index.to(device), self_loops], dim=1)

@@ -1,105 +1,80 @@
 import torch
 import torch.nn as nn
-from typing import List
+import torch.nn.functional as F
 
 
-class CustomGNN(nn.Module):
-    """
-    Simple GNN for fraud detection.
-
-    - Uses embeddings for each categorical column
-    - Projects numeric features to the same embedding dimension
-    - Concatenates numeric + categorical embeddings for each node
-    - Applies a few GCN-style message-passing steps implemented in plain PyTorch
-    - Outputs a fraud logit per transaction (node)
-    """
-
+class SimpleGNN(nn.Module):
     def __init__(
         self,
         num_numeric: int,
-        num_categories: List[int],
-        emb_dim: int = 16,
+        num_categories_per_col,
+        embed_dim: int = 16,
         hidden_dim: int = 64,
-        num_layers: int = 2,
-        dropout: float = 0.1,
     ):
         super().__init__()
 
         self.num_numeric = num_numeric
-        self.num_categories = num_categories
-        self.emb_dim = emb_dim
+        self.num_categorical = len(num_categories_per_col)
 
-        # One embedding table per categorical column
-        self.cat_embeddings = nn.ModuleList(
-            [nn.Embedding(cardinality, emb_dim) for cardinality in num_categories]
+        # One embedding per categorical column
+        self.embeddings = nn.ModuleList(
+            [
+                nn.Embedding(num_categories, embed_dim)
+                for num_categories in num_categories_per_col
+            ]
         )
 
-        # Project numeric features into the same embedding space
-        self.numeric_proj = nn.Linear(num_numeric, emb_dim)
+        in_dim = num_numeric + self.num_categorical * embed_dim
 
-        # GNN hidden stack
-        in_dim = emb_dim * (len(num_categories) + 1)
-        self.layers = nn.ModuleList()
-        self.activations = nn.ModuleList()
-
-        prev_dim = in_dim
-        for _ in range(num_layers):
-            layer = nn.Linear(prev_dim, hidden_dim, bias=False)
-            nn.init.xavier_uniform_(layer.weight)
-            self.layers.append(layer)
-            self.activations.append(nn.ReLU())
-            prev_dim = hidden_dim
-
-        self.dropout = nn.Dropout(dropout)
-        self.out = nn.Linear(prev_dim, 1)
+        self.fc_in = nn.Linear(in_dim, hidden_dim)
+        self.fc_out = nn.Linear(hidden_dim, 1)
 
     def gcn_step(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """
-        Very simple GCN-style message passing:
-        - For each destination node, sum neighbor features
-        - Divide by degree to get a mean
+        Very simple GCN-like aggregation:
+        - Sum neighbor features
+        - Divide by degree
+        - ReLU
         """
-        # x: [N, d], edge_index: [2, E]
-        src, dst = edge_index
-        N = x.size(0)
+        if edge_index.numel() == 0:
+            # No edges: just return x passed through
+            return x
 
-        # Aggregate neighbor messages
-        agg = torch.zeros_like(x)
+        src, dst = edge_index  # each shape (E,)
+
+        num_nodes, feat_dim = x.shape
+        device = x.device
+
+        # aggregate neighbor features into each destination node
+        agg = torch.zeros_like(x, device=device)
         agg.index_add_(0, dst, x[src])
 
-        # Degree-normalize
-        deg = torch.bincount(dst, minlength=N).unsqueeze(1).clamp(min=1)
+        # degree for each node
+        deg = torch.zeros(num_nodes, device=device)
+        deg.index_add_(0, dst, torch.ones_like(dst, dtype=deg.dtype))
+        deg = deg.clamp(min=1.0).unsqueeze(1)
+
         agg = agg / deg
-        return agg
+        return F.relu(agg)
 
-    def forward(
-        self,
-        x_num: torch.Tensor,      # [N, num_numeric]
-        x_cat: torch.Tensor,      # [N, num_categorical]
-        edge_index: torch.Tensor  # [2, E]
-    ) -> torch.Tensor:
-        # Build initial node features
-        num_emb = self.numeric_proj(x_num)  # [N, emb_dim]
+    def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor, edge_index: torch.Tensor):
+        """
+        x_num: (N, num_numeric)
+        x_cat: (N, num_categorical)
+        edge_index: (2, E)
+        """
+        # Embed categorical columns
+        embeds = []
+        if x_cat.numel() > 0:
+            for i in range(x_cat.shape[1]):
+                embeds.append(self.embeddings[i](x_cat[:, i]))
+            cat_feats = torch.cat(embeds, dim=1)
+            h = torch.cat([x_num, cat_feats], dim=1)
+        else:
+            h = x_num
 
-        cat_embs = []
-        for i, emb in enumerate(self.cat_embeddings):
-            cat_embs.append(emb(x_cat[:, i]))  # each [N, emb_dim]
+        h = F.relu(self.fc_in(h))
+        h = self.gcn_step(h, edge_index)
+        logits = self.fc_out(h).squeeze(-1)  # (N,)
 
-        x = torch.cat([num_emb] + cat_embs, dim=1)  # [N, (num_cats+1)*emb_dim]
-
-        # Add self-loops so every node keeps some of its own info
-        N = x.size(0)
-        device = x.device
-        self_loops = torch.arange(N, device=device)
-        self_loops = torch.stack([self_loops, self_loops], dim=0)  # [2, N]
-        edge_index = torch.cat([edge_index.to(device), self_loops], dim=1)
-
-        h = x
-        for layer, act in zip(self.layers, self.activations):
-            h = self.gcn_step(h, edge_index)
-            h = layer(h)
-            h = act(h)
-            h = self.dropout(h)
-
-        logits = self.out(h).squeeze(1)  # [N]
         return logits

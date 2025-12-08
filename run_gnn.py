@@ -12,24 +12,21 @@ Run from project root:
     python run_gnn.py
 """
 
-import torch
-
 from src.data_loading import load_merged_train
 from src.feature_selection import auto_select_features
 from src.gnn_custom.train_gnn import train_gnn
 
 
 def main():
-
     print("\n==============================")
     print(" STEP 1: Loading Data")
     print("==============================")
     df = load_merged_train(data_dir="data")
 
-    # Optional debug mode
-    DEBUG_MODE = True
+    # Optional debug mode – keep this ON while debugging the GNN
+    DEBUG_MODE = False
     if DEBUG_MODE:
-        df = df.sample(n=5000, random_state=42)
+        df = df.sample(n=5000, random_state=42).reset_index(drop=True)
         print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
 
     print("\n==============================")
@@ -49,7 +46,9 @@ def main():
         df,
         numeric_cols,
         categorical_cols,
-        target_col="isFraud"
+        target_col="isFraud",
+        num_epochs=5,
+        k_neighbors=5,
     )
 
     print("\n==============================")
