@@ -8,6 +8,7 @@ from sklearn.metrics import (
     f1_score,
     roc_auc_score,
     average_precision_score,
+    precision_recall_curve,
 )
 
 from src.gnn_custom.graph_utils import build_transaction_graph
@@ -133,21 +134,47 @@ def train_gnn(
 
         print(f"[GNN Epoch {epoch}] loss={loss.item():.4f}")
 
-    # ---------- Evaluation on validation split ----------
+       # ---------- Evaluation on validation split ----------
     model.eval()
     with torch.no_grad():
-        logits = model(x_num, x_cat, edge_index)
-        probs = torch.sigmoid(logits)
-        preds = (probs > 0.5).float()
+        logits = model(x_num, x_cat, edge_index)  # (N,)
+        probs = torch.sigmoid(logits)            # (N,)
 
+    # Pull validation part to CPU/NumPy
     y_true = y[val_idx].cpu().numpy()
-    y_pred = preds[val_idx].cpu().numpy()
     y_score = probs[val_idx].cpu().numpy()
 
-    # If any NaNs still sneak in, replace them so metrics don't crash
-    if np.isnan(y_score).any():
-        print("Warning: y_score contained NaNs; replacing with 0.5 for metrics.")
-        y_score = np.nan_to_num(y_score, nan=0.5)
+    # 1) Compute precision-recall curve over many thresholds
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_score)
+
+    # thresholds has len = len(precisions) - 1
+    # Compute F1 for each candidate threshold
+    f1_scores = 2 * precisions[:-1] * recalls[:-1] / (precisions[:-1] + recalls[:-1] + 1e-8)
+
+    # 2) Pick the threshold that maximizes F1
+    best_idx = f1_scores.argmax()
+    best_threshold = thresholds[best_idx]
+
+    # 3) Turn probabilities into hard labels using this learned threshold
+    y_pred = (y_score >= best_threshold).astype("int32")
+
+    # 4) Compute metrics at this threshold
+    precision_val = precision_score(y_true, y_pred, zero_division=0)
+    recall_val = recall_score(y_true, y_pred, zero_division=0)
+    f1_val = f1_score(y_true, y_pred, zero_division=0)
+    roc_auc_val = roc_auc_score(y_true, y_score)
+    pr_auc_val = average_precision_score(y_true, y_score)
+
+    metrics = {
+        "precision": precision_val,
+        "recall": recall_val,
+        "f1": f1_val,
+        "roc_auc": roc_auc_val,
+        "pr_auc": pr_auc_val,
+        "best_threshold": float(best_threshold),
+    }
+
+    return metrics, model
 
     metrics = {
         "precision": precision_score(y_true, y_pred, zero_division=0),
