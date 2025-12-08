@@ -113,7 +113,7 @@ def train_gnn(
         pos_weight = torch.tensor(1.0, device=device)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(),lr=3e-4)
 
     # ---------- Training loop (full-batch) ----------
     for epoch in range(1, num_epochs + 1):
