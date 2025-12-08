@@ -5,28 +5,24 @@ from sklearn.neighbors import NearestNeighbors
 
 def build_transaction_graph(df, numeric_cols, k_neighbors=5):
     """
-    Build a simple k-NN graph over transactions using numeric features.
+    Build a k-NN graph using ONLY the rows present in df.
+    This ensures edge_index always aligns with x_num/x_cat tensors.
 
-    - Nodes: each transaction (row in df)
-    - Edges: undirected edges between k nearest neighbours in numeric space
-
-    Returns
-    -------
-    edge_index : LongTensor of shape (2, E)
-        edge_index[0] = source node indices
-        edge_index[1] = destination node indices
+    Nodes: transactions (0..N-1)
+    Edges: k nearest neighbors in numeric space (undirected)
     """
-    # Make sure the index is 0..N-1 so row positions match node ids
+
+    # Reset index so node IDs = row numbers
     df = df.reset_index(drop=True)
     num_nodes = len(df)
 
     if num_nodes == 0:
         raise ValueError("build_transaction_graph: dataframe is empty")
 
-    # Use numeric features to define similarity
+    # Numeric feature matrix
     X = df[numeric_cols].fillna(0.0).values.astype("float32")
 
-    # We ask for k+1 neighbors because the closest neighbor is the point itself
+    # If dataset is very small, shrink k
     k = min(k_neighbors + 1, num_nodes)
 
     nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
@@ -39,19 +35,25 @@ def build_transaction_graph(df, numeric_cols, k_neighbors=5):
     for i in range(num_nodes):
         for j in indices[i]:
             if i == j:
-                # skip self-loop; we can always add them later if we want
-                continue
-            # add edge i -> j
+                continue  # skip self-loop
+
+            # Add edge i → j
             src_list.append(i)
             dst_list.append(j)
-            # and j -> i to make it undirected
+
+            # Add reverse edge j → i
             src_list.append(j)
             dst_list.append(i)
 
-    if not src_list:
-        # fallback: no neighbors found (degenerate tiny case)
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-    else:
-        edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
+    # No edges?
+    if len(src_list) == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+
+    edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
+
+    # -------- SAFETY CHECK -------- #
+    # Remove edges that refer to out-of-range nodes
+    mask = (edge_index[0] < num_nodes) & (edge_index[1] < num_nodes)
+    edge_index = edge_index[:, mask]
 
     return edge_index
