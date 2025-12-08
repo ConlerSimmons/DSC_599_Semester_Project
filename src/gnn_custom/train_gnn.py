@@ -100,8 +100,8 @@ def train_gnn(
     model = SimpleGNN(
         num_numeric=len(numeric_cols),
         num_categories_per_col=cat_sizes,
-        embed_dim=8,
-        hidden_dim=32,
+        embed_dim=32,
+        hidden_dim=128,
     ).to(device)
 
     # Handle class imbalance (same spirit as TabTransformer)
