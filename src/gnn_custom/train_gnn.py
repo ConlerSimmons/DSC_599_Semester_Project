@@ -21,6 +21,7 @@ def train_gnn(
     target_col: str = "isFraud",
     num_epochs: int = 5,
     k_neighbors: int = 5,
+    lr: float = 1e-3,
 ):
     """
     Train the SimpleGNN model on the transaction data.
@@ -47,18 +48,16 @@ def train_gnn(
     if num_nodes == 0:
         raise ValueError("train_gnn: dataframe is empty")
 
-    # ---------- Standardize numeric features ----------
-    # This keeps the GNN from getting dominated by huge magnitudes.
-    num_df = df[numeric_cols].astype("float32")
+    # ---------- Numeric features: standardize to avoid huge scales ----------
+    num_df = df[numeric_cols].fillna(0.0).astype("float32")
     means = num_df.mean()
-    stds = num_df.std().replace(0.0, 1.0)  # avoid division by zero
+    stds = num_df.std().replace(0, 1.0)  # avoid division by zero
     num_df = (num_df - means) / stds
 
-    # Numeric tensor
-    x_num = torch.tensor(
-        num_df.values,
-        dtype=torch.float32,
-    )
+    # Write back scaled numeric features so graph building sees the same values
+    df[numeric_cols] = num_df
+
+    x_num = torch.tensor(num_df.values, dtype=torch.float32)
 
     # ---------- Categorical → per-column mapping ----------
     cat_sizes = []
@@ -82,14 +81,8 @@ def train_gnn(
         dtype=torch.float32,
     )
 
-    # ---------- Build graph (uses standardized numeric features' *original* df index) ----------
-    # For the graph structure, we just need a stable numeric representation,
-    # so we use the standardized numeric features we just computed.
-    df_for_graph = df.copy()
-    for i, col in enumerate(numeric_cols):
-        df_for_graph[col] = num_df.iloc[:, i]
-
-    edge_index = build_transaction_graph(df_for_graph, numeric_cols, k_neighbors=k_neighbors)
+    # ---------- Graph ----------
+    edge_index = build_transaction_graph(df, numeric_cols, k_neighbors=k_neighbors)
 
     # ---------- Train / val split ----------
     train_size = int(0.8 * num_nodes)
@@ -107,22 +100,20 @@ def train_gnn(
     model = SimpleGNN(
         num_numeric=len(numeric_cols),
         num_categories_per_col=cat_sizes,
-        embed_dim=16,
-        hidden_dim=64,
+        embed_dim=8,
+        hidden_dim=32,
     ).to(device)
 
-    # ---------- Class imbalance handling ----------
+    # Handle class imbalance (same spirit as TabTransformer)
     pos = (y[train_idx] == 1).sum()
     neg = (y[train_idx] == 0).sum()
-
-    # Base ratio (neg/pos) can be ~25–30 for this dataset; cap to keep things stable.
-    ratio = neg.float() / pos.float()
-    pos_weight = torch.clamp(ratio, min=1.0, max=10.0)
+    if pos > 0:
+        pos_weight = (neg / pos).clamp(min=1.0)
+    else:
+        pos_weight = torch.tensor(1.0, device=device)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    # Slightly smaller LR to keep training from going wild
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
     # ---------- Training loop (full-batch) ----------
     for epoch in range(1, num_epochs + 1):
@@ -131,6 +122,11 @@ def train_gnn(
 
         logits = model(x_num, x_cat, edge_index)  # (N,)
         loss = criterion(logits[train_idx], y[train_idx])
+
+        # Guard against NaN in loss (shouldn't happen, but just in case)
+        if not torch.isfinite(loss):
+            print(f"[GNN Epoch {epoch}] loss became non-finite: {loss.item()}")
+            break
 
         loss.backward()
         optimizer.step()
@@ -147,6 +143,11 @@ def train_gnn(
     y_true = y[val_idx].cpu().numpy()
     y_pred = preds[val_idx].cpu().numpy()
     y_score = probs[val_idx].cpu().numpy()
+
+    # If any NaNs still sneak in, replace them so metrics don't crash
+    if np.isnan(y_score).any():
+        print("Warning: y_score contained NaNs; replacing with 0.5 for metrics.")
+        y_score = np.nan_to_num(y_score, nan=0.5)
 
     metrics = {
         "precision": precision_score(y_true, y_pred, zero_division=0),

@@ -23,10 +23,10 @@ def main():
     print("==============================")
     df = load_merged_train(data_dir="data")
 
-    # Optional debug mode – keep this ON while debugging the GNN
-    DEBUG_MODE = False
+    # Debug mode: keep it small while we debug the GNN
+    DEBUG_MODE = True
     if DEBUG_MODE:
-        df = df.sample(n=5000, random_state=42).reset_index(drop=True)
+        df = df.sample(n=5000, random_state=42)
         print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
 
     print("\n==============================")

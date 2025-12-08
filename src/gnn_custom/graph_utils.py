@@ -3,26 +3,30 @@ import numpy as np
 from sklearn.neighbors import NearestNeighbors
 
 
-def build_transaction_graph(df, numeric_cols, k_neighbors=5):
+def build_transaction_graph(df, numeric_cols, k_neighbors: int = 5) -> torch.Tensor:
     """
-    Build a k-NN graph using ONLY the rows present in df.
-    This ensures edge_index always aligns with x_num/x_cat tensors.
+    Build a simple k-NN graph over transactions using numeric features.
 
-    Nodes: transactions (0..N-1)
-    Edges: k nearest neighbors in numeric space (undirected)
+    Nodes: each transaction (row in df)
+    Edges: undirected edges between k nearest neighbours in numeric space
+
+    Returns
+    -------
+    edge_index : LongTensor of shape (2, E)
+        edge_index[0] = source node indices
+        edge_index[1] = destination node indices
     """
-
-    # Reset index so node IDs = row numbers
+    # Make sure index is 0..N-1 so row positions match node ids
     df = df.reset_index(drop=True)
     num_nodes = len(df)
 
     if num_nodes == 0:
         raise ValueError("build_transaction_graph: dataframe is empty")
 
-    # Numeric feature matrix
-    X = df[numeric_cols].fillna(0.0).values.astype("float32")
+    # Use numeric features (already scaled in train_gnn) to define similarity
+    X = df[numeric_cols].values.astype("float32")
 
-    # If dataset is very small, shrink k
+    # Request k+1 neighbors (the closest neighbor is the point itself)
     k = min(k_neighbors + 1, num_nodes)
 
     nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
@@ -35,25 +39,21 @@ def build_transaction_graph(df, numeric_cols, k_neighbors=5):
     for i in range(num_nodes):
         for j in indices[i]:
             if i == j:
-                continue  # skip self-loop
+                # skip self-loop here; model can still handle self-information
+                continue
 
-            # Add edge i → j
+            # i -> j
             src_list.append(i)
             dst_list.append(j)
 
-            # Add reverse edge j → i
+            # j -> i to make it undirected
             src_list.append(j)
             dst_list.append(i)
 
-    # No edges?
-    if len(src_list) == 0:
-        return torch.empty((2, 0), dtype=torch.long)
-
-    edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
-
-    # -------- SAFETY CHECK -------- #
-    # Remove edges that refer to out-of-range nodes
-    mask = (edge_index[0] < num_nodes) & (edge_index[1] < num_nodes)
-    edge_index = edge_index[:, mask]
+    if not src_list:
+        # fallback: no neighbors found (degenerate tiny case)
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+    else:
+        edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
 
     return edge_index
