@@ -47,7 +47,7 @@ def main():
         numeric_cols,
         categorical_cols,
         target_col="isFraud",
-        num_epochs=75,
+        num_epochs=50,
         k_neighbors=12,
     )
 
