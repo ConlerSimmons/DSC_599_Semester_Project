@@ -47,14 +47,20 @@ def train_gnn(
     if num_nodes == 0:
         raise ValueError("train_gnn: dataframe is empty")
 
-    # ---------- Build tensors ----------
-    # Numeric
+    # ---------- Standardize numeric features ----------
+    # This keeps the GNN from getting dominated by huge magnitudes.
+    num_df = df[numeric_cols].astype("float32")
+    means = num_df.mean()
+    stds = num_df.std().replace(0.0, 1.0)  # avoid division by zero
+    num_df = (num_df - means) / stds
+
+    # Numeric tensor
     x_num = torch.tensor(
-        df[numeric_cols].fillna(0.0).values.astype("float32"),
+        num_df.values,
         dtype=torch.float32,
     )
 
-    # Categorical → per-column mapping
+    # ---------- Categorical → per-column mapping ----------
     cat_sizes = []
     cat_arrays = []
     for col in categorical_cols:
@@ -70,14 +76,20 @@ def train_gnn(
     else:
         x_cat = torch.empty((num_nodes, 0), dtype=torch.long)
 
-    # Target
+    # ---------- Target ----------
     y = torch.tensor(
         df[target_col].values.astype("float32"),
         dtype=torch.float32,
     )
 
-    # ---------- Build graph ----------
-    edge_index = build_transaction_graph(df, numeric_cols, k_neighbors=k_neighbors)
+    # ---------- Build graph (uses standardized numeric features' *original* df index) ----------
+    # For the graph structure, we just need a stable numeric representation,
+    # so we use the standardized numeric features we just computed.
+    df_for_graph = df.copy()
+    for i, col in enumerate(numeric_cols):
+        df_for_graph[col] = num_df.iloc[:, i]
+
+    edge_index = build_transaction_graph(df_for_graph, numeric_cols, k_neighbors=k_neighbors)
 
     # ---------- Train / val split ----------
     train_size = int(0.8 * num_nodes)
@@ -99,13 +111,18 @@ def train_gnn(
         hidden_dim=64,
     ).to(device)
 
-    # Handle class imbalance similar to TabTransformer run
+    # ---------- Class imbalance handling ----------
     pos = (y[train_idx] == 1).sum()
     neg = (y[train_idx] == 0).sum()
-    pos_weight = (neg / pos).clamp(min=1.0)
+
+    # Base ratio (neg/pos) can be ~25–30 for this dataset; cap to keep things stable.
+    ratio = neg.float() / pos.float()
+    pos_weight = torch.clamp(ratio, min=1.0, max=10.0)
+
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    # Slightly smaller LR to keep training from going wild
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
     # ---------- Training loop (full-batch) ----------
     for epoch in range(1, num_epochs + 1):
