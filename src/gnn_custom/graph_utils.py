@@ -1,96 +1,106 @@
 import torch
-import pandas as pd
-from typing import List
-
-# Columns we will use to create edges between transactions.
-# We only use the ones that actually exist in df.columns.
-EDGE_COLUMNS: List[str] = [
-    "card1",
-    "addr1",
-    "P_emaildomain",
-    "id_30",
-    "DeviceInfo",
-    "id_31",
-]
+import numpy as np
+from sklearn.neighbors import NearestNeighbors
 
 
-def build_transaction_graph(df, numeric_cols=None, k_neighbors: int = 5):
+def build_transaction_graph(
+    df,
+    numeric_cols,
+    k_neighbors: int = 5,
+    min_group_size: int = 2,
+    max_group_size: int = 1000,
+):
     """
-    Build a graph over transactions using *categorical identity/device features*.
+    Build a hybrid transaction graph.
 
-    Nodes:
-        - Each transaction (row in df), with index 0..N-1
+    - Nodes: each transaction (one row in df after reset_index)
+    - Edges:
+        1) k-NN edges in numeric feature space
+        2) Star-style edges for shared identity/device-type categorical fields
 
-    Edges:
-        - For each column in EDGE_COLUMNS (that exists in df):
-            - Group rows by that column's value
-            - For each group with size >= 2, connect the rows in a "star":
-                  center node <-> each other node
-              This gives us an undirected edge pattern, but avoids
-              O(group_size^2) fully-connected cliques.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        The (already merged and filtered) transaction dataframe.
-        Its index will be reset inside this function so that row positions
-        match node IDs 0..N-1.
-    numeric_cols : list or None
-        Kept for API compatibility. Not used in this graph builder.
-    k_neighbors : int
-        Kept for API compatibility. Ignored in this implementation.
-
-    Returns
-    -------
-    edge_index : torch.LongTensor of shape (2, E)
-        edge_index[0] = source node indices
-        edge_index[1] = destination node indices
+    I’m trying to keep this simple enough to reason about, but richer than
+    pure k-NN so the GNN can actually exploit identity-like patterns.
     """
-    # Ensure index is 0..N-1 so row positions are stable node IDs
+
+    # I reset the index so row positions match node IDs 0..N-1
     df = df.reset_index(drop=True)
     num_nodes = len(df)
 
     if num_nodes == 0:
         raise ValueError("build_transaction_graph: dataframe is empty")
 
+    # ------------------------------------------------------------------
+    # 1) k-NN edges on numeric features
+    # ------------------------------------------------------------------
+    X = df[numeric_cols].fillna(0.0).values.astype("float32")
+
+    # I keep k reasonably small so the graph doesn't become too dense
+    k = min(k_neighbors + 1, num_nodes)  # +1 to account for self
+
+    nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
+    nn.fit(X)
+    distances, indices = nn.kneighbors(X)
+
     src_list = []
     dst_list = []
 
-    # We only use edge columns that are actually present in the dataframe
-    used_columns = [col for col in EDGE_COLUMNS if col in df.columns]
-
-    if not used_columns:
-        # No usable columns -> return an empty graph
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-        return edge_index
-
-    for col in used_columns:
-        col_series = df[col]
-
-        # Build groups of indices by category value, skipping NaNs
-        # (NaN would otherwise make one giant, meaningless group).
-        # We use a dict: value -> list of row indices.
-        groups = {}
-        for idx, val in col_series.items():
-            if pd.isna(val):
+    for i in range(num_nodes):
+        for j in indices[i]:
+            if i == j:
+                # skip self-loop; we could add them later if we wanted
                 continue
-            groups.setdefault(val, []).append(idx)
+            # edge i -> j
+            src_list.append(i)
+            dst_list.append(j)
+            # and j -> i to keep it undirected
+            src_list.append(j)
+            dst_list.append(i)
 
-        # For each group, build a star: center <-> each other node
-        for _, indices in groups.items():
-            if len(indices) < 2:
-                continue  # no edges from singleton groups
+    # ------------------------------------------------------------------
+    # 2) Identity / device style edges (star pattern)
+    # ------------------------------------------------------------------
+    candidate_id_cols = [
+        "card1",
+        "addr1",
+        "P_emaildomain",
+        "id_30",
+        "id_31",
+        "DeviceInfo",
+    ]
 
-            center = indices[0]
-            for other in indices[1:]:
-                # center -> other
-                src_list.append(center)
+    # Only use columns that actually exist in df
+    active_id_cols = [c for c in candidate_id_cols if c in df.columns]
+
+    for col in active_id_cols:
+        # I cast to string so everything is comparable (including NaNs)
+        values = df[col].astype(str)
+
+        # Group rows by the shared value in this column
+        groups = values.groupby(values).groups  # dict: value -> Int64Index
+
+        for val, idxs in groups.items():
+            group_idx = list(idxs)
+            group_size = len(group_idx)
+
+            # I only connect groups that are "moderate" in size
+            if group_size < min_group_size or group_size > max_group_size:
+                continue
+
+            # Star pattern: choose first node as hub
+            hub = group_idx[0]
+            for other in group_idx[1:]:
+                # hub -> other
+                src_list.append(hub)
                 dst_list.append(other)
-                # other -> center (make graph undirected
+                # other -> hub
                 src_list.append(other)
-                dst_list.append(center)
+                dst_list.append(hub)
 
+    # ------------------------------------------------------------------
+    # 3) Final edge_index tensor
+    # ------------------------------------------------------------------
     if not src_list:
+        # Degenerate case: no edges at all
         edge_index = torch.empty((2, 0), dtype=torch.long)
     else:
         edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
