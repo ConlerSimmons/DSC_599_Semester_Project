@@ -1,7 +1,3 @@
-from typing import List, Tuple
-
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,117 +9,164 @@ from sklearn.metrics import (
     average_precision_score,
 )
 
-from .gnn_model import CustomGNN
-from .graph_utils import build_edge_index_from_key, add_self_loops
+from src.gnn_custom.gnn_model import CustomGNN
+from src.gnn_custom.graph_utils import build_transaction_graph
 
 
 def train_gnn(
-    df: pd.DataFrame,
-    numeric_cols: List[str],
-    categorical_cols: List[str],
+    df,
+    numeric_cols,
+    categorical_cols,
     target_col: str = "isFraud",
-    epochs: int = 5,
+    hidden_dim: int = 64,
+    num_layers: int = 2,
+    dropout: float = 0.2,
     lr: float = 1e-3,
-) -> Tuple[dict, CustomGNN]:
+    num_epochs: int = 5,
+    k_neighbors: int = 5,
+    max_edges: int = 200_000,
+):
     """
-    I train the CustomGNN on the provided dataframe and return (metrics, model).
+    Train a simple GNN for fraud detection on the IEEE-CIS dataset.
 
-    - df: pre-merged train dataframe (optionally already sub-sampled by caller)
-    - numeric_cols / categorical_cols: lists chosen by feature_selection
-    - target_col: fraud label
+    IMPORTANT: we build the graph over *all* rows in `df`, and we train in a
+    transductive way:
+      - Node features and edge_index always cover the full set of nodes.
+      - We use index masks (train_idx, val_idx) to decide which nodes contribute
+        to the loss and which are used for validation metrics.
+
+    This avoids the "index out of bounds" error where edge_index refers to nodes
+    that aren't present in a sliced feature matrix.
     """
 
-    # 1) Encode categorical columns to integer codes per column
-    cat_cardinalities = []
-    encoded_cat_cols = []
+    device = torch.device("cpu")  # you can parameterize this later if needed
 
-    for col in categorical_cols:
-        codes, uniques = pd.factorize(df[col].astype(str), sort=True)
-        enc_col = f"{col}__encoded"
-        df[enc_col] = codes
-        encoded_cat_cols.append(enc_col)
-        cat_cardinalities.append(len(uniques))
-
-    # 2) Build tensors
+    # ------------------------------------------------------------------
+    # 1. Build node features for ALL rows
+    # ------------------------------------------------------------------
+    # Numeric features
     x_num = torch.tensor(df[numeric_cols].fillna(0).values, dtype=torch.float32)
-    x_cat = torch.tensor(df[encoded_cat_cols].values, dtype=torch.long)
+
+    # Categorical features: encode each column as integer indices
+    cat_maps = []
+    cat_tensors = []
+    for col in categorical_cols:
+        # Map unique categories in this column to consecutive ints
+        uniques = df[col].astype(str).unique()
+        mapping = {v: i for i, v in enumerate(uniques)}
+        cat_maps.append(mapping)
+        cat_tensors.append(
+            torch.tensor([mapping[v] for v in df[col].astype(str)], dtype=torch.long)
+        )
+
+    # Stack categorical columns -> shape [num_nodes, num_categorical]
+    x_cat = torch.stack(cat_tensors, dim=1)
+
+    # Labels
     y = torch.tensor(df[target_col].values, dtype=torch.float32)
 
-    N = len(df)
+    num_nodes = x_num.shape[0]
+    assert x_cat.shape[0] == num_nodes, "Numeric and categorical node counts must match"
+    assert y.shape[0] == num_nodes, "Labels must match number of nodes"
 
-    # 3) Train/val split (random 80/20 split)
-    idx = np.arange(N)
-    rng = np.random.default_rng(42)
-    rng.shuffle(idx)
+    # ------------------------------------------------------------------
+    # 2. Build graph over ALL nodes
+    # ------------------------------------------------------------------
+    # We treat each row as a node and connect nodes that share card numbers,
+    # email domains, etc. You can tweak which columns are used here.
+    # For now we'll just use a few "relationship-ish" columns if present.
+    relation_cols = []
+    for candidate in ["card1", "card2", "card3", "card5", "P_emaildomain", "R_emaildomain"]:
+        if candidate in df.columns:
+            relation_cols.append(candidate)
 
-    train_size = int(0.8 * N)
-    train_idx = idx[:train_size]
-    val_idx = idx[train_size:]
+    edge_index = build_transaction_graph(
+        df=df,
+        categorical_cols=relation_cols,
+        k_neighbors=k_neighbors,
+        max_edges=max_edges,
+    )
 
-    x_num_train, x_cat_train, y_train = x_num[train_idx], x_cat[train_idx], y[train_idx]
-    x_num_val, x_cat_val, y_val = x_num[val_idx], x_cat[val_idx], y[val_idx]
+    # edge_index is shape [2, num_edges] with indices in [0, num_nodes-1]
+    # Move everything to device
+    x_num = x_num.to(device)
+    x_cat = x_cat.to(device)
+    y = y.to(device)
+    edge_index = edge_index.to(device)
 
-    # 4) Build graph edges on the full dataframe (indexes 0..N-1)
-    df_reset = df.reset_index(drop=True)
-    edge_index = build_edge_index_from_key(df_reset, key_col="card1")
-    device = torch.device("cpu")
+    # ------------------------------------------------------------------
+    # 3. Train / validation split (BY INDICES ONLY)
+    # ------------------------------------------------------------------
+    train_size = int(0.8 * num_nodes)
+    train_idx = torch.arange(0, train_size, dtype=torch.long, device=device)
+    val_idx = torch.arange(train_size, num_nodes, dtype=torch.long, device=device)
 
-    # I add self-loops once here so every layer has them
-    edge_index = add_self_loops(edge_index, num_nodes=N, device=device)
+    print(f"Training size: {len(train_idx)}, Validation size: {len(val_idx)}")
 
+    # ------------------------------------------------------------------
+    # 4. Model, loss, optimizer
+    # ------------------------------------------------------------------
     model = CustomGNN(
-        num_numeric=len(numeric_cols),
-        num_categories=cat_cardinalities,
-        emb_dim=16,
-        hidden_dim=64,
-        num_layers=2,
-        dropout=0.1,
+        num_numeric=x_num.shape[1],
+        num_categories_per_col=[len(m) for m in cat_maps],
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=dropout,
     ).to(device)
 
-    # Class imbalance weighting based on training labels
-    num_pos = (y_train == 1).sum()
-    num_neg = (y_train == 0).sum()
-    pos_weight = (num_neg / (num_pos + 1e-8)).to(device)
+    # Class imbalance: weight fraud class more heavily
+    pos_count = (y[train_idx] == 1).sum().item()
+    neg_count = (y[train_idx] == 0).sum().item()
+    if neg_count == 0:
+        pos_weight_value = 1.0
+    else:
+        pos_weight_value = neg_count / max(pos_count, 1)
+    pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32, device=device)
+    print(f"Class imbalance → pos_weight = {pos_weight_value:.2f}")
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    # Move tensors to device
-    edge_index = edge_index.to(device)
-    x_num_train = x_num_train.to(device)
-    x_cat_train = x_cat_train.to(device)
-    y_train = y_train.to(device)
-    x_num_val = x_num_val.to(device)
-    x_cat_val = x_cat_val.to(device)
-    y_val = y_val.to(device)
-
-    # 5) Full-batch training (simple but fine for a debug-sized subset)
-    for epoch in range(1, epochs + 1):
+    # ------------------------------------------------------------------
+    # 5. Training loop (full-graph, masked loss)
+    # ------------------------------------------------------------------
+    for epoch in range(1, num_epochs + 1):
         model.train()
         optimizer.zero_grad()
-        logits = model(x_num_train, x_cat_train, edge_index)
-        loss = criterion(logits, y_train)
+
+        # Forward for ALL nodes
+        logits_all = model(x_num, x_cat, edge_index).view(-1)
+
+        # Compute loss ONLY on training nodes
+        logits_train = logits_all[train_idx]
+        y_train = y[train_idx]
+        loss = criterion(logits_train, y_train)
+
         loss.backward()
         optimizer.step()
+
         print(f"[GNN Epoch {epoch}] loss={loss.item():.4f}")
 
-    # 6) Evaluation
+    # ------------------------------------------------------------------
+    # 6. Evaluation on validation nodes
+    # ------------------------------------------------------------------
     model.eval()
     with torch.no_grad():
-        logits_val = model(x_num_val, x_cat_val, edge_index)
-        probs_val = torch.sigmoid(logits_val)
-        preds_val = (probs_val > 0.5).float()
+        logits_all = model(x_num, x_cat, edge_index).view(-1)
+        probs_all = torch.sigmoid(logits_all)
 
-    y_true = y_val.cpu().numpy()
-    y_pred = preds_val.cpu().numpy()
-    y_score = probs_val.cpu().numpy()
+    # Only use validation indices for metrics
+    y_val = y[val_idx].detach().cpu().numpy()
+    logits_val = logits_all[val_idx].detach().cpu().numpy()
+    probs_val = probs_all[val_idx].detach().cpu().numpy()
+    preds_val = (probs_val > 0.5).astype(float)
 
     metrics = {
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-        "roc_auc": roc_auc_score(y_true, y_score),
-        "pr_auc": average_precision_score(y_true, y_score),
+        "precision": precision_score(y_val, preds_val, zero_division=0),
+        "recall": recall_score(y_val, preds_val, zero_division=0),
+        "f1": f1_score(y_val, preds_val, zero_division=0),
+        "roc_auc": roc_auc_score(y_val, probs_val),
+        "pr_auc": average_precision_score(y_val, probs_val),
     }
 
     return metrics, model
