@@ -24,7 +24,7 @@ def main():
     df = load_merged_train(data_dir="data")
 
     # Debug mode: keep it small while we debug the GNN
-    DEBUG_MODE = True
+    DEBUG_MODE = False
     if DEBUG_MODE:
         df = df.sample(n=5000, random_state=42)
         print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
