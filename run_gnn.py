@@ -14,7 +14,7 @@ def main():
     print("==============================")
     df = load_merged_train(data_dir="data")
 
-    DEBUG_MODE = False
+    DEBUG_MODE = True
     if DEBUG_MODE:
         df = df.sample(n=5000, random_state=42)
         print(f"DEBUG MODE ACTIVE: using {len(df)} rows")
