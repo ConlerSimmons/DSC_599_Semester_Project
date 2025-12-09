@@ -1,15 +1,5 @@
 """
 Runner script for the Custom GNN model.
-
-This script:
-1. Loads and merges the IEEE-CIS fraud dataset
-2. Selects numeric + categorical features
-3. Trains the GNN
-4. Prints evaluation metrics
-
-Run from project root:
-
-    python run_gnn.py
 """
 
 from src.data_loading import load_merged_train
@@ -18,16 +8,16 @@ from src.gnn_custom.train_gnn import train_gnn
 
 
 def main():
+
     print("\n==============================")
     print(" STEP 1: Loading Data")
     print("==============================")
     df = load_merged_train(data_dir="data")
 
-    # Debug mode: keep it small while we debug the GNN
     DEBUG_MODE = False
     if DEBUG_MODE:
         df = df.sample(n=5000, random_state=42)
-        print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
+        print(f"DEBUG MODE ACTIVE: using {len(df)} rows")
 
     print("\n==============================")
     print(" STEP 2: Feature Selection")
@@ -48,14 +38,13 @@ def main():
         categorical_cols,
         target_col="isFraud",
         num_epochs=50,
-        k_neighbors=12,
     )
 
     print("\n==============================")
     print(" GNN Model Metrics")
     print("==============================")
     for k, v in gnn_metrics.items():
-        print(f"{k:10s} : {v:.4f}")
+        print(f"{k:12s} : {v:.4f}")
 
 
 if __name__ == "__main__":
