@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.utils import clip_grad_norm_
 from sklearn.metrics import (
     precision_score,
     recall_score,
@@ -22,7 +23,7 @@ def train_gnn(
     target_col: str = "isFraud",
     num_epochs: int = 5,
     k_neighbors: int = 5,
-    lr: float = 3e-4,
+    lr: float = 1e-3,
 ):
     """
     Train the SimpleGNN model on the transaction data.
@@ -109,6 +110,7 @@ def train_gnn(
         num_categories_per_col=cat_sizes,
         embed_dim=32,
         hidden_dim=128,
+        dropout=0.1,
     ).to(device)
 
     # ---------- Class imbalance handling ----------
@@ -120,7 +122,12 @@ def train_gnn(
         pos_weight = torch.tensor(1.0, device=device)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
     optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    # Simple LR scheduler: step down halfway and 3/4 through training
+    step_size = max(num_epochs // 3, 1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
 
     # ---------- Training loop (full-batch) ----------
     for epoch in range(1, num_epochs + 1):
@@ -136,7 +143,12 @@ def train_gnn(
             break
 
         loss.backward()
+
+        # Gradient clipping to keep deeper GNN stable
+        clip_grad_norm_(model.parameters(), max_norm=5.0)
+
         optimizer.step()
+        scheduler.step()
 
         print(f"[GNN Epoch {epoch}] loss={loss.item():.4f}")
 
@@ -150,7 +162,7 @@ def train_gnn(
     y_true = y[val_idx].cpu().numpy()
     y_score = probs[val_idx].cpu().numpy()
 
-    # 1 Precision-recall curve over many thresholds
+    # 1) Precision-recall curve over many thresholds
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_score)
 
     # thresholds has len = len(precisions) - 1
@@ -158,14 +170,14 @@ def train_gnn(
         precisions[:-1] + recalls[:-1] + 1e-8
     )
 
-    # 2 Pick the threshold that maximizes F1
+    # 2) Pick the threshold that maximizes F1
     best_idx = f1_scores.argmax()
     best_threshold = thresholds[best_idx]
 
-    # 3 Turn probabilities into hard labels using this learned threshold
+    # 3) Turn probabilities into hard labels using this learned threshold
     y_pred = (y_score >= best_threshold).astype("int32")
 
-    # 4 Compute metrics at this threshold
+    # 4) Compute metrics at this threshold
     precision_val = precision_score(y_true, y_pred, zero_division=0)
     recall_val = recall_score(y_true, y_pred, zero_division=0)
     f1_val = f1_score(y_true, y_pred, zero_division=0)
