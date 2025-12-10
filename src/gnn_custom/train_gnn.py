@@ -27,23 +27,9 @@ def train_gnn(
 ):
     """
     Train the SimpleGNN model on the transaction data.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-    numeric_cols : list[str]
-    categorical_cols : list[str]
-    target_col : str
-    num_epochs : int
-    k_neighbors : int
-    lr : float
-
-    Returns
-    -------
-    metrics : dict
-    model : nn.Module
     """
-    # ---------- Column subset & index reset (node ids 0..N-1) ----------
+
+    # ---------- Column subset & index reset ----------
     cols = numeric_cols + categorical_cols + [target_col]
     df = df[cols].copy().reset_index(drop=True)
 
@@ -54,15 +40,13 @@ def train_gnn(
     # ---------- Numeric features: standardize ----------
     num_df = df[numeric_cols].fillna(0.0).astype("float32")
     means = num_df.mean()
-    stds = num_df.std().replace(0, 1.0)  # avoid division by zero
+    stds = num_df.std().replace(0, 1.0)
     num_df = (num_df - means) / stds
-
-    # Write back scaled numeric features so graph building sees the same values
     df[numeric_cols] = num_df
 
     x_num = torch.tensor(num_df.values, dtype=torch.float32)
 
-    # ---------- Categorical → per-column mapping ----------
+    # ---------- Categorical → integer encodings ----------
     cat_sizes = []
     cat_arrays = []
     for col in categorical_cols:
@@ -73,32 +57,27 @@ def train_gnn(
         cat_arrays.append(values.map(mapping).astype("int64").values)
 
     if cat_arrays:
-        x_cat_np = np.stack(cat_arrays, axis=1)  # (N, num_categorical)
+        x_cat_np = np.stack(cat_arrays, axis=1)
         x_cat = torch.tensor(x_cat_np, dtype=torch.long)
     else:
         x_cat = torch.empty((num_nodes, 0), dtype=torch.long)
 
     # ---------- Target ----------
-    y = torch.tensor(
-        df[target_col].values.astype("float32"),
-        dtype=torch.float32,
-    )
+    y = torch.tensor(df[target_col].values.astype("float32"))
 
-    # ---------- Graph ----------
+    # ---------- Build Graph ----------
     edge_index = build_transaction_graph(
-        df,
+        df=df,
         numeric_cols=numeric_cols,
         k_neighbors=k_neighbors,
-        # keep defaults for min_group_size, max_group_size, small_group_full_connect
     )
 
-    # ---------- Train / val split ----------
+    # ---------- Train / validation split ----------
     train_size = int(0.8 * num_nodes)
     train_idx = torch.arange(0, train_size)
     val_idx = torch.arange(train_size, num_nodes)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     x_num = x_num.to(device)
     x_cat = x_cat.to(device)
     y = y.to(device)
@@ -113,71 +92,58 @@ def train_gnn(
         dropout=0.1,
     ).to(device)
 
-    # ---------- Class imbalance handling ----------
+    # ---------- Class imbalance weighting ----------
     pos = (y[train_idx] == 1).sum()
     neg = (y[train_idx] == 0).sum()
-    if pos > 0:
-        pos_weight = (neg / pos).clamp(min=1.0)
-    else:
-        pos_weight = torch.tensor(1.0, device=device)
+    pos_weight = (neg / pos).clamp(min=1.0) if pos > 0 else torch.tensor(1.0, device=device)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    # Simple LR scheduler: step down halfway and 3/4 through training
+    # Learning rate scheduler
     step_size = max(num_epochs // 3, 1)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
 
-    # ---------- Training loop (full-batch) ----------
+    # ---------- Training Loop ----------
     for epoch in range(1, num_epochs + 1):
         model.train()
         optimizer.zero_grad()
 
-        logits = model(x_num, x_cat, edge_index)  # (N,)
+        logits = model(x_num, x_cat, edge_index)
         loss = criterion(logits[train_idx], y[train_idx])
 
-        # Guard against NaN in loss (shouldn't happen, but just in case)
         if not torch.isfinite(loss):
-            print(f"[GNN Epoch {epoch}] loss became non-finite: {loss.item()}")
+            print(f"[GNN Epoch {epoch}] Non-finite loss: {loss.item()}")
             break
 
         loss.backward()
-
-        # Gradient clipping to keep deeper GNN stable
         clip_grad_norm_(model.parameters(), max_norm=5.0)
-
         optimizer.step()
         scheduler.step()
 
         print(f"[GNN Epoch {epoch}] loss={loss.item():.4f}")
 
-    # ---------- Evaluation on validation split ----------
+    # ---------- Evaluation ----------
     model.eval()
     with torch.no_grad():
-        logits = model(x_num, x_cat, edge_index)  # (N,)
-        probs = torch.sigmoid(logits)            # (N,)
+        logits = model(x_num, x_cat, edge_index)
+        probs = torch.sigmoid(logits)
 
-    # Pull validation part to CPU/NumPy
     y_true = y[val_idx].cpu().numpy()
     y_score = probs[val_idx].cpu().numpy()
 
-    # 1) Precision-recall curve over many thresholds
+    # Precision-Recall curve for threshold optimization
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_score)
 
-    # thresholds has len = len(precisions) - 1
     f1_scores = 2 * precisions[:-1] * recalls[:-1] / (
         precisions[:-1] + recalls[:-1] + 1e-8
     )
-
-    # 2) Pick the threshold that maximizes F1
     best_idx = f1_scores.argmax()
     best_threshold = thresholds[best_idx]
 
-    # 3) Turn probabilities into hard labels using this learned threshold
     y_pred = (y_score >= best_threshold).astype("int32")
 
-    # 4) Compute metrics at this threshold
     precision_val = precision_score(y_true, y_pred, zero_division=0)
     recall_val = recall_score(y_true, y_pred, zero_division=0)
     f1_val = f1_score(y_true, y_pred, zero_division=0)
