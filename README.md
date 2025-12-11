@@ -85,7 +85,7 @@ python run_tabTransformer.py
 
 ---
 
-# 🕸️ Graph Neural Network (GNN) Architecture
+# Graph Neural Network (GNN) Architecture
 
 The GNN pipeline has three major parts:
 
