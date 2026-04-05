@@ -1,3 +1,4 @@
+import torch
 import numpy as np
 from sklearn.metrics import (
     precision_recall_fscore_support,
@@ -5,6 +6,15 @@ from sklearn.metrics import (
     roc_auc_score,
     auc,
 )
+
+
+def get_device() -> torch.device:
+    """Return the best available device: CUDA → MPS (Apple Silicon) → CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def compute_metrics(y_true: np.ndarray, y_proba: np.ndarray, threshold: float = 0.5):

@@ -4,6 +4,8 @@ scikit-learn
 torch
 pytorch-tabular
 pyarrow
+xgboost
+lightgbm
 requests
 matplotlib
 seaborn

@@ -1,0 +1,73 @@
+=== BASELINE START Sun Apr  5 01:34:21 CDT 2026 ===
+/Users/conlersimmons/DSC_599_Semester_Project/.venv/lib/python3.11/site-packages/sklearn/utils/validation.py:2749: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/conlersimmons/DSC_599_Semester_Project/.venv/lib/python3.11/site-packages/sklearn/utils/validation.py:2749: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+
+==============================
+ STEP 1: Loading Data
+==============================
+Loading cached merged data from data/interim/merged_train.parquet ...
+Loaded from cache. Shape: (590540, 434)
+Data sorted by TransactionDT. Shape: (590540, 434)
+Split → train: 413378, val: 88581, test: 88581
+
+==============================
+ STEP 2: Feature Selection
+==============================
+Selected 40 numeric features and 20 categorical features.
+Numeric: ['TransactionDT', 'TransactionAmt', 'card1', 'card2', 'card3', 'card5', 'addr1', 'addr2', 'dist1', 'dist2', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'C14', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13', 'D14', 'D15', 'V1']
+Categorical: ['ProductCD', 'card4', 'card6', 'P_emaildomain', 'R_emaildomain', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'id_12', 'id_15', 'id_16', 'id_28', 'id_29', 'id_30']
+
+==============================
+ STEP 3: Preparing Features
+==============================
+scale_pos_weight = 27.43
+
+========================================
+ Training XGBoost
+========================================
+
+----- XGBoost — Validation -----
+  val_precision               : 0.5972
+  val_recall                  : 0.4313
+  val_f1                      : 0.5009
+  val_roc_auc                 : 0.9075
+  val_pr_auc                  : 0.5169
+  val_best_threshold          : 0.7832
+
+----- XGBoost — Test -----
+  test_precision              : 0.6292
+  test_recall                 : 0.3626
+  test_f1                     : 0.4601
+  test_roc_auc                : 0.8919
+  test_pr_auc                 : 0.4745
+  test_best_threshold         : 0.8567
+
+========================================
+ Training LightGBM
+========================================
+
+----- LightGBM — Validation -----
+  val_precision               : 0.5938
+  val_recall                  : 0.4372
+  val_f1                      : 0.5036
+  val_roc_auc                 : 0.9050
+  val_pr_auc                  : 0.5157
+  val_best_threshold          : 0.8086
+
+----- LightGBM — Test -----
+  test_precision              : 0.6492
+  test_recall                 : 0.3698
+  test_f1                     : 0.4712
+  test_roc_auc                : 0.8936
+  test_pr_auc                 : 0.4802
+  test_best_threshold         : 0.8780
+
+
+==============================
+ SUMMARY (Test Set PR-AUC)
+==============================
+  XGBoost  test_pr_auc : 0.4745
+  LightGBM test_pr_auc : 0.4802
+=== BASELINE DONE Sun Apr  5 01:34:45 CDT 2026 ===

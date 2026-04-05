@@ -43,13 +43,26 @@ def main():
         print(f"DEBUG MODE ACTIVE: using {len(df)} rows instead of full dataset")
     # -------------------------------------------------
 
+    # Sort by TransactionDT for temporal ordering
+    df = df.sort_values("TransactionDT").reset_index(drop=True)
+    print(f"Data sorted by TransactionDT. Shape: {df.shape}")
+
+    # 70/15/15 temporal train/val/test split
+    n = len(df)
+    n_train = int(0.70 * n)
+    n_val   = int(0.15 * n)
+    train_idx = list(range(0, n_train))
+    val_idx   = list(range(n_train, n_train + n_val))
+    test_idx  = list(range(n_train + n_val, n))
+    print(f"Split → train: {len(train_idx)}, val: {len(val_idx)}, test: {len(test_idx)}")
+
     print("\n==============================")
     print(" STEP 2: Feature Selection")
     print("==============================")
     numeric_cols, categorical_cols = auto_select_features(
         df,
         target_col="isFraud",
-        max_numeric=20,
+        max_numeric=50,
         max_categorical=20,
     )
 
@@ -57,13 +70,14 @@ def main():
     print(" STEP 3: Training Custom TabTransformer")
     print("==============================")
 
-    # Only two return values (metrics, model) — matches the current training function
     custom_metrics, custom_model = train_tabtransformer_custom(
-        df, numeric_cols, categorical_cols, target_col="isFraud"
+        df, numeric_cols, categorical_cols, target_col="isFraud",
+        num_epochs=25,
+        train_idx=train_idx, val_idx=val_idx, test_idx=test_idx,
     )
 
     print("\n==============================")
-    print(" Custom Model Metrics")
+    print(" Custom Model Metrics (Val + Test)")
     print("==============================")
     for k, v in custom_metrics.items():
         print(f"{k:10s} : {v:.4f}")

@@ -20,7 +20,7 @@ class SimpleGNN(nn.Module):
         num_numeric: int,
         num_categories_per_col,
         embed_dim: int = 32,
-        hidden_dim: int = 128,
+        hidden_dim: int = 256,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -49,13 +49,15 @@ class SimpleGNN(nn.Module):
         self.input_linear = nn.Linear(total_in_dim, hidden_dim)
 
         # ----------------------------------------------------------------------
-        # Two-layer residual GNN
+        # Three-layer residual GNN
         # ----------------------------------------------------------------------
         self.gcn_linear1 = nn.Linear(hidden_dim, hidden_dim)
         self.gcn_linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.gcn_linear3 = nn.Linear(hidden_dim, hidden_dim)
 
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
+        self.norm3 = nn.LayerNorm(hidden_dim)
 
         self.dropout = nn.Dropout(dropout)
         self.activation = nn.ReLU()
@@ -122,6 +124,15 @@ class SimpleGNN(nn.Module):
         h = self.activation(self.gcn_linear2(h_mp))
         h = self.dropout(h)
         h = self.norm2(h + h_res)
+
+        # =======================
+        # LAYER 3 (Residual GNN)
+        # =======================
+        h_res = h
+        h_mp = self.gcn_step(h, edge_index)
+        h = self.activation(self.gcn_linear3(h_mp))
+        h = self.dropout(h)
+        h = self.norm3(h + h_res)
 
         # ----- output -----
         return self.out_linear(h).squeeze(-1)

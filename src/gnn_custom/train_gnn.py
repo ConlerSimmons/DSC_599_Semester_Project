@@ -13,6 +13,7 @@ from sklearn.metrics import (
 
 from src.gnn_custom.graph_utils import build_transaction_graph
 from src.gnn_custom.gnn_model import SimpleGNN
+from src.utils_metrics import get_device
 
 
 def train_gnn(
@@ -20,9 +21,12 @@ def train_gnn(
     numeric_cols,
     categorical_cols,
     target_col: str = "isFraud",
-    num_epochs: int = 50,
-    k_neighbors: int = 5,
-    lr: float = 3e-4,
+    num_epochs: int = 150,
+    lr: float = 1e-3,
+    train_idx=None,
+    val_idx=None,
+    test_idx=None,
+    early_stopping_patience: int = 20,
 ):
     """
     Train the SimpleGNN model on the transaction data.
@@ -68,18 +72,22 @@ def train_gnn(
     )
 
     # ---------- Graph ----------
-    edge_index = build_transaction_graph(
-        df,
-        numeric_cols=numeric_cols,
-        k_neighbors=k_neighbors,
-    )
+    edge_index = build_transaction_graph(df)
 
-    # ---------- Train/val split ----------
-    train_size = int(0.8 * num_nodes)
-    train_idx = torch.arange(0, train_size)
-    val_idx = torch.arange(train_size, num_nodes)
+    # ---------- Train/val/test split ----------
+    if train_idx is None or val_idx is None:
+        train_size = int(0.8 * num_nodes)
+        train_idx = list(range(0, train_size))
+        val_idx   = list(range(train_size, num_nodes))
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_idx = torch.tensor(train_idx, dtype=torch.long)
+    val_idx   = torch.tensor(val_idx, dtype=torch.long)
+    test_idx  = torch.tensor(test_idx, dtype=torch.long) if test_idx is not None else None
+
+    # GNN uses full-graph training — edge_index for 590k nodes is too large for MPS.
+    # CPU is fast enough (~13 sec/epoch) and avoids MPS memory pressure.
+    device = torch.device("cpu")
+    print(f"Using device: {device}")
 
     x_num = x_num.to(device)
     x_cat = x_cat.to(device)
@@ -101,9 +109,14 @@ def train_gnn(
     pos_weight = (neg / pos).clamp(min=1.0)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
-    # ---------- Training loop ----------
+    # ---------- Training loop with early stopping ----------
+    best_val_pr_auc = -1.0
+    best_epoch = 0
+    patience_counter = 0
+    best_state = None
+
     for epoch in range(1, num_epochs + 1):
         model.train()
         optimizer.zero_grad()
@@ -116,9 +129,35 @@ def train_gnn(
             break
 
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        print(f"[GNN Epoch {epoch}] loss={loss.item():.4f}")
+        # Compute val PR-AUC for early stopping
+        model.eval()
+        with torch.no_grad():
+            val_logits = model(x_num, x_cat, edge_index)
+            val_probs  = torch.sigmoid(val_logits)
+        ep_val_true  = y[val_idx].cpu().numpy()
+        ep_val_score = val_probs[val_idx].cpu().numpy()
+        ep_val_pr_auc = average_precision_score(ep_val_true, ep_val_score)
+
+        print(f"[GNN Epoch {epoch}] loss={loss.item():.4f}  val_pr_auc={ep_val_pr_auc:.4f}")
+
+        if ep_val_pr_auc > best_val_pr_auc:
+            best_val_pr_auc = ep_val_pr_auc
+            best_epoch = epoch
+            patience_counter = 0
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience_counter += 1
+            if patience_counter >= early_stopping_patience:
+                print(f"Early stopping at epoch {epoch}. Best epoch: {best_epoch} (val_pr_auc={best_val_pr_auc:.4f})")
+                break
+
+    if best_state is not None:
+        best_state = {k: v.to(device) for k, v in best_state.items()}
+        model.load_state_dict(best_state)
+        print(f"Restored best model from epoch {best_epoch}")
 
     # ---------- Evaluation ----------
     model.eval()
@@ -140,12 +179,34 @@ def train_gnn(
     y_pred = (y_score >= best_threshold).astype("int32")
 
     metrics = {
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-        "roc_auc": roc_auc_score(y_true, y_score),
-        "pr_auc": average_precision_score(y_true, y_score),
-        "best_threshold": float(best_threshold),
+        "val_precision":      precision_score(y_true, y_pred, zero_division=0),
+        "val_recall":         recall_score(y_true, y_pred, zero_division=0),
+        "val_f1":             f1_score(y_true, y_pred, zero_division=0),
+        "val_roc_auc":        roc_auc_score(y_true, y_score),
+        "val_pr_auc":         average_precision_score(y_true, y_score),
+        "val_best_threshold": float(best_threshold),
     }
+
+    print("\n===== GNN — Validation =====")
+    for k, v in metrics.items():
+        print(f"{k:22s}: {v:.4f}")
+
+    # ---------- Test set evaluation ----------
+    if test_idx is not None:
+        y_test_true  = y[test_idx].cpu().numpy()
+        y_test_score = probs[test_idx].cpu().numpy()
+        y_test_pred  = (y_test_score >= best_threshold).astype("int32")
+
+        test_metrics = {
+            "test_precision": precision_score(y_test_true, y_test_pred, zero_division=0),
+            "test_recall":    recall_score(y_test_true, y_test_pred, zero_division=0),
+            "test_f1":        f1_score(y_test_true, y_test_pred, zero_division=0),
+            "test_roc_auc":   roc_auc_score(y_test_true, y_test_score),
+            "test_pr_auc":    average_precision_score(y_test_true, y_test_score),
+        }
+        print("\n===== GNN — Test =====")
+        for k, v in test_metrics.items():
+            print(f"{k:22s}: {v:.4f}")
+        metrics.update(test_metrics)
 
     return metrics, model

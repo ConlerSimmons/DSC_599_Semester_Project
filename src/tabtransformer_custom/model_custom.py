@@ -17,7 +17,7 @@ class CustomTabTransformer(nn.Module):
         self,
         vocab_sizes,
         num_numeric_features,
-        d_token: int = 32,
+        d_token: int = 64,
         n_heads: int = 4,
         n_layers: int = 3,
         dropout: float = 0.1,
@@ -33,11 +33,13 @@ class CustomTabTransformer(nn.Module):
             nn.Embedding(n_cat, d_token) for n_cat in vocab_sizes
         ])
 
-        # 2) One numeric token
-        self.num_linear = nn.Linear(num_numeric_features, d_token)
+        # 2) One token per numeric feature — stored as a single weight matrix
+        #    for efficient batched projection (avoids a Python loop in forward)
+        self.num_weight = nn.Parameter(torch.randn(num_numeric_features, d_token) * 0.02)
+        self.num_bias   = nn.Parameter(torch.zeros(num_numeric_features, d_token))
 
-        # Total token count = 1 numeric token + N categorical tokens
-        self.n_tokens = 1 + len(vocab_sizes)
+        # Total token count = num_numeric tokens + N categorical tokens
+        self.n_tokens = num_numeric_features + len(vocab_sizes)
 
         # 3) Transformer encoder blocks
         encoder_layer = nn.TransformerEncoderLayer(
@@ -53,11 +55,13 @@ class CustomTabTransformer(nn.Module):
         )
 
         # 4) Classification head
+        # LayerNorm stabilises the flattened transformer output before the MLP
         self.head = nn.Sequential(
-            nn.Linear(self.n_tokens * d_token, 128),
+            nn.LayerNorm(self.n_tokens * d_token),
+            nn.Linear(self.n_tokens * d_token, 256),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(128, 1),
+            nn.Linear(256, 1),
         )
 
     def forward(self, x_num, x_cat):
@@ -67,8 +71,12 @@ class CustomTabTransformer(nn.Module):
         """
         x_num = x_num.float()
         x_cat = x_cat.long()
-        # Numeric token
-        num_token = self.num_linear(x_num).unsqueeze(1)
+
+        # One token per numeric feature — single batched matmul, no Python loop
+        # x_num: (batch, n_num) -> unsqueeze -> (batch, n_num, 1)
+        # num_weight: (n_num, d_token) -> broadcast over batch
+        num_tokens = x_num.unsqueeze(2) * self.num_weight.unsqueeze(0) + self.num_bias.unsqueeze(0)
+        # result: (batch, n_num, d_token)
 
         # Categorical tokens
         cat_tokens = torch.stack(
@@ -76,8 +84,8 @@ class CustomTabTransformer(nn.Module):
             dim=1
         )
 
-        # Sequence = [numeric_token] + [each categorical token]
-        tokens = torch.cat([num_token, cat_tokens], dim=1)
+        # Sequence = [numeric tokens] + [categorical tokens]
+        tokens = torch.cat([num_tokens, cat_tokens], dim=1)
 
         # Transformer encoder
         encoded = self.transformer(tokens)

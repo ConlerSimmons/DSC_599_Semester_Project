@@ -1,0 +1,71 @@
+=== TABTRANSFORMER START Sun Apr  5 16:59:03 CDT 2026 ===
+
+==============================
+ STEP 1: Loading Data
+==============================
+Loading cached merged data from data/interim/merged_train.parquet ...
+Loaded from cache. Shape: (590540, 434)
+Data sorted by TransactionDT. Shape: (590540, 434)
+Split → train: 413378, val: 88581, test: 88581
+
+==============================
+ STEP 2: Feature Selection
+==============================
+Selected 50 numeric features and 20 categorical features.
+Numeric: ['TransactionDT', 'TransactionAmt', 'card1', 'card2', 'card3', 'card5', 'addr1', 'addr2', 'dist1', 'dist2', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'C14', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13', 'D14', 'D15', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10', 'V11']
+Categorical: ['ProductCD', 'card4', 'card6', 'P_emaildomain', 'R_emaildomain', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'id_12', 'id_15', 'id_16', 'id_28', 'id_29', 'id_30']
+
+==============================
+ STEP 3: Training Custom TabTransformer
+==============================
+Using device: mps
+Using device for custom model: mps
+Training size: 413378, Validation size: 88581
+Class imbalance → pos_weight = 27.43
+[Custom Epoch 1] loss=1.0549  val_pr_auc=0.3504  lr=9.89e-04
+[Custom Epoch 2] loss=0.9616  val_pr_auc=0.3265  lr=9.57e-04
+[Custom Epoch 3] loss=1.0263  val_pr_auc=0.2966  lr=9.05e-04
+[Custom Epoch 4] loss=0.9742  val_pr_auc=0.3670  lr=8.35e-04
+[Custom Epoch 5] loss=1.0397  val_pr_auc=0.3735  lr=7.50e-04
+[Custom Epoch 6] loss=0.9832  val_pr_auc=0.3492  lr=6.55e-04
+[Custom Epoch 7] loss=0.9275  val_pr_auc=0.3831  lr=5.53e-04
+[Custom Epoch 8] loss=0.9159  val_pr_auc=0.3877  lr=4.48e-04
+[Custom Epoch 9] loss=0.8789  val_pr_auc=0.3935  lr=3.46e-04
+[Custom Epoch 10] loss=0.8664  val_pr_auc=0.4017  lr=2.51e-04
+[Custom Epoch 11] loss=0.8486  val_pr_auc=0.4126  lr=1.66e-04
+[Custom Epoch 12] loss=0.8308  val_pr_auc=0.4155  lr=9.64e-05
+[Custom Epoch 13] loss=0.8217  val_pr_auc=0.4178  lr=4.42e-05
+[Custom Epoch 14] loss=0.8153  val_pr_auc=0.4188  lr=1.19e-05
+[Custom Epoch 15] loss=0.8128  val_pr_auc=0.4194  lr=1.00e-06
+Restored best model from epoch 15
+
+===== Custom TabTransformer — Validation =====
+val_precision         : 0.5135
+val_recall            : 0.3554
+val_f1                : 0.4201
+val_roc_auc           : 0.8590
+val_pr_auc            : 0.4194
+val_best_threshold    : 0.8967
+
+===== Custom TabTransformer — Test =====
+test_precision        : 0.4676
+test_recall           : 0.3656
+test_f1               : 0.4103
+test_roc_auc          : 0.8507
+test_pr_auc           : 0.3945
+
+==============================
+ Custom Model Metrics (Val + Test)
+==============================
+val_precision : 0.5135
+val_recall : 0.3554
+val_f1     : 0.4201
+val_roc_auc : 0.8590
+val_pr_auc : 0.4194
+val_best_threshold : 0.8967
+test_precision : 0.4676
+test_recall : 0.3656
+test_f1    : 0.4103
+test_roc_auc : 0.8507
+test_pr_auc : 0.3945
+=== TABTRANSFORMER DONE Sun Apr  5 17:33:10 CDT 2026 ===

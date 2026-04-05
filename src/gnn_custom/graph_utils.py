@@ -1,12 +1,10 @@
 import torch
 import numpy as np
-from sklearn.neighbors import NearestNeighbors
 
 
 def build_transaction_graph(
     df,
-    numeric_cols,
-    k_neighbors: int = 5,
+    numeric_cols=None,
     min_group_size: int = 2,
     max_group_size: int = 1000,
     small_group_full_connect: int = 10,
@@ -20,11 +18,7 @@ def build_transaction_graph(
 
     Edges
     -----
-    1 k-NN edges in numeric feature space
-       - Uses scaled numeric features passed in via `numeric_cols`.
-       - Undirected: for each i->j we also add j->i.
-
-    2 Identity/device-style edges for:
+    Identity/device-style edges for:
            card1, addr1, P_emaildomain, id_30, id_31, DeviceInfo
        - Groups rows that share the same value in one of these columns.
        - For each group with size in [min_group_size, max_group_size]:
@@ -36,8 +30,8 @@ def build_transaction_graph(
                      - Connect hub <-> everyone.
                      - Also connect neighbors along a chain:
                          idx[0] <-> idx[1], idx[1] <-> idx[2], ...
-       - This is richer than a simple star, but we still avoid
-         fully dense cliques for very large groups.
+       - This tests the core research hypothesis: do shared identifiers
+         (same card, device, email) create correlated fraud patterns?
 
     Returns
     -------
@@ -52,40 +46,19 @@ def build_transaction_graph(
     if num_nodes == 0:
         raise ValueError("build_transaction_graph: dataframe is empty")
 
-    # ------------------------------------------------------------------
-    # 1 k-NN edges on numeric features
-    # ------------------------------------------------------------------
-    X = df[numeric_cols].fillna(0.0).values.astype("float32")
-
-    # Keep k reasonably small so the graph doesn't blow up
-    k = min(k_neighbors + 1, num_nodes)  # +1 to include the point itself
-
-    nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
-    nn.fit(X)
-    distances, indices = nn.kneighbors(X)
-
     src_list = []
     dst_list = []
 
-    for i in range(num_nodes):
-        for j in indices[i]:
-            if i == j:
-                # Skip self-loop here; we'll handle self-loops separately if needed
-                continue
-            # i -> j
-            src_list.append(i)
-            dst_list.append(j)
-            # j -> i (undirected)
-            src_list.append(j)
-            dst_list.append(i)
-
     # ------------------------------------------------------------------
-    # 2 Identity / device / browser-style edges (cluster pattern)
+    # Identity / device / browser-style edges (cluster pattern)
     # ------------------------------------------------------------------
     candidate_id_cols = [
         "card1",
+        "card4",
+        "card6",
         "addr1",
         "P_emaildomain",
+        "R_emaildomain",
         "id_30",
         "id_31",
         "DeviceInfo",
@@ -103,6 +76,10 @@ def build_transaction_graph(
         groups = values.groupby(values).groups
 
         for val, idxs in groups.items():
+            # Skip NaN placeholders — don't connect transactions just because both lack this field
+            if val in ("nan", "None", ""):
+                continue
+
             group_idx = list(idxs)
             group_size = len(group_idx)
 
