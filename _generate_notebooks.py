@@ -53,21 +53,28 @@ INSTALL_TABT = """\
 INSTALL_GNN = INSTALL_TABT
 
 DATA_SETUP = '''\
-# ── Data path configuration ──────────────────────────────────────────────────
-# Option 1 (default): files already at data/raw/ relative to this notebook
+import os
+
+# ── Kaggle API download (default — works out of the box in Colab) ─────────────
+# Prerequisites (one-time setup):
+#   1. Go to kaggle.com → Account → API → "Create New Token" → downloads kaggle.json
+#   2. In Colab: Secrets (🔑 icon in left sidebar) → add KAGGLE_USERNAME and KAGGLE_KEY
+#      (copy the values from your kaggle.json file)
+#   3. Run this cell — it will download and unzip the data automatically
+
+from google.colab import userdata
+os.environ["KAGGLE_USERNAME"] = userdata.get("KAGGLE_USERNAME")
+os.environ["KAGGLE_KEY"]      = userdata.get("KAGGLE_KEY")
+
 DATA_DIR = "data"
+os.makedirs(f"{DATA_DIR}/raw",     exist_ok=True)
+os.makedirs(f"{DATA_DIR}/interim", exist_ok=True)
 
-# Option 2: mount Google Drive
-# from google.colab import drive
-# drive.mount("/content/drive")
-# DATA_DIR = "/content/drive/MyDrive/ieee_cis_fraud/data"
-
-# Option 3: download via Kaggle API
-# !pip install -q kaggle
-# !kaggle competitions download -c ieee-fraud-detection -p data/raw/
-# !unzip -q data/raw/ieee-fraud-detection.zip -d data/raw/
-
-print(f"DATA_DIR = {DATA_DIR}")\
+print("Downloading IEEE-CIS Fraud Detection dataset from Kaggle …")
+os.system("pip install -q kaggle")
+os.system(f"kaggle competitions download -c ieee-fraud-detection -p {DATA_DIR}/raw/ --unzip -q")
+print("Download complete. Files in data/raw/:")
+os.system(f"ls -lh {DATA_DIR}/raw/")\
 '''
 
 LOAD_MERGED = '''\
