@@ -54,28 +54,28 @@ INSTALL_GNN = INSTALL_TABT
 
 DATA_SETUP = '''\
 import os
+from google.colab import drive
 
-# ── Kaggle API download ───────────────────────────────────────────────────────
-# One-time setup:
-#   1. kaggle.com → Settings → API → "Create New Token"
-#   2. Copy the entire token string Kaggle gives you (looks like {"username":...,"key":...})
-#   3. In Colab: click the 🔑 Secrets icon → "Add new secret"
-#        Name:  KAGGLE_API_TOKEN
-#        Value: paste the full token string
-#        Toggle "Notebook access" ON
-#   4. Also accept the competition rules at kaggle.com/c/ieee-fraud-detection
+# ── Mount Google Drive and point to your data ─────────────────────────────────
+# Before running:
+#   1. Upload train_transaction.csv and train_identity.csv to Google Drive
+#      e.g. into a folder called "ieee_fraud/raw/"
+#   2. Update DRIVE_DATA_PATH below to match where you put them
+#   3. Run this cell — it will prompt you to authorise Drive access
 
-from google.colab import userdata
-os.environ["KAGGLE_API_TOKEN"] = userdata.get("KAGGLE_API_TOKEN")
+drive.mount("/content/drive")
 
+DRIVE_DATA_PATH = "/content/drive/MyDrive/ieee_fraud/raw"  # ← update this if needed
 DATA_DIR = "data"
+
 os.makedirs(f"{DATA_DIR}/raw",     exist_ok=True)
 os.makedirs(f"{DATA_DIR}/interim", exist_ok=True)
 
-print("Downloading IEEE-CIS Fraud Detection dataset from Kaggle …")
-os.system("pip install -q kaggle")
-os.system(f"kaggle competitions download -c ieee-fraud-detection -p {DATA_DIR}/raw/ --unzip -q")
-print("Download complete. Files in data/raw/:")
+# Copy from Drive to Colab local storage (faster reads during training)
+os.system(f"cp {DRIVE_DATA_PATH}/train_transaction.csv {DATA_DIR}/raw/")
+os.system(f"cp {DRIVE_DATA_PATH}/train_identity.csv    {DATA_DIR}/raw/")
+
+print("Files ready:")
 os.system(f"ls -lh {DATA_DIR}/raw/")\
 '''
 
