@@ -65,7 +65,7 @@ from google.colab import drive
 
 drive.mount("/content/drive")
 
-DRIVE_DATA_PATH = "/content/drive/MyDrive/ieee_fraud/raw"  # ← update this if needed
+DRIVE_DATA_PATH = "/content/drive/MyDrive/Data_Fraud"  # ← update if your folder name differs
 DATA_DIR = "data"
 
 os.makedirs(f"{DATA_DIR}/raw",     exist_ok=True)
