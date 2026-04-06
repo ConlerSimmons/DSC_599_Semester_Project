@@ -22,11 +22,11 @@ Both models use the same 70/15/15 temporal split (sorted by `TransactionDT`) and
 
 | Metric | TabTransformer | GNN |
 |---|---|---|
-| **test PR-AUC** | **0.4383** | 0.3695 |
-| test ROC-AUC | 0.8373 | **0.8476** |
-| test Recall | 0.5037 | **0.5388** |
-| test Precision | **0.3764** | 0.2330 |
-| test F1 | **0.4309** | 0.3253 |
+| **test PR-AUC** | **0.4140** | 0.3695 |
+| test ROC-AUC | 0.8314 | **0.8476** |
+| test Recall | 0.5219 | **0.5388** |
+| test Precision | **0.3136** | 0.2330 |
+| test F1 | **0.3918** | 0.3253 |
 
 TabTransformer wins on most metrics. The GNN catches slightly more fraud (higher recall) but with more false positives. Both perform roughly 10–12× above random (random PR-AUC ≈ 0.035). For a full breakdown see [`ARCHITECTURE_REPORT.md`](ARCHITECTURE_REPORT.md).
 
