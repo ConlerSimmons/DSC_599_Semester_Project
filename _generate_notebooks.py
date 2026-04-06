@@ -55,16 +55,18 @@ INSTALL_GNN = INSTALL_TABT
 DATA_SETUP = '''\
 import os
 
-# ── Kaggle API download (default — works out of the box in Colab) ─────────────
-# Prerequisites (one-time setup):
-#   1. Go to kaggle.com → Account → API → "Create New Token" → downloads kaggle.json
-#   2. In Colab: Secrets (🔑 icon in left sidebar) → add KAGGLE_USERNAME and KAGGLE_KEY
-#      (copy the values from your kaggle.json file)
-#   3. Run this cell — it will download and unzip the data automatically
+# ── Kaggle API download ───────────────────────────────────────────────────────
+# One-time setup:
+#   1. kaggle.com → Settings → API → "Create New Token"
+#   2. Copy the entire token string Kaggle gives you (looks like {"username":...,"key":...})
+#   3. In Colab: click the 🔑 Secrets icon → "Add new secret"
+#        Name:  KAGGLE_API_TOKEN
+#        Value: paste the full token string
+#        Toggle "Notebook access" ON
+#   4. Also accept the competition rules at kaggle.com/c/ieee-fraud-detection
 
 from google.colab import userdata
-os.environ["KAGGLE_USERNAME"] = userdata.get("KAGGLE_USERNAME")
-os.environ["KAGGLE_KEY"]      = userdata.get("KAGGLE_KEY")
+os.environ["KAGGLE_API_TOKEN"] = userdata.get("KAGGLE_API_TOKEN")
 
 DATA_DIR = "data"
 os.makedirs(f"{DATA_DIR}/raw",     exist_ok=True)
