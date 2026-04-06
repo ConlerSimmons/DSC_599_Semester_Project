@@ -47,7 +47,7 @@ INSTALL_BASELINE = """\
 
 INSTALL_TABT = """\
 # Install required packages (run once in Colab)
-!pip install -q torch pandas numpy scikit-learn pyarrow\
+!pip install -q torch pandas numpy scikit-learn pyarrow lightgbm\
 """
 
 INSTALL_GNN = INSTALL_TABT
@@ -177,6 +177,74 @@ train_idx = list(range(0, n_train))
 val_idx   = list(range(n_train, n_train + n_val))
 test_idx  = list(range(n_train + n_val, n))
 print(f"Train: {len(train_idx):,}  Val: {len(val_idx):,}  Test: {len(test_idx):,}")\
+'''
+
+# Feature selection using LightGBM importance — used by TabTransformer and GNN notebooks.
+# Split must be defined first so LightGBM is fit on training data only (no leakage).
+FEATURE_SEL_LGBM = '''\
+import numpy as np
+import pandas as pd
+from lightgbm import LGBMClassifier
+
+def select_features_by_importance(df, train_idx, target_col="isFraud",
+                                   max_numeric=50, max_categorical=20):
+    """
+    Rank all candidate features by LightGBM split importance, then pick the top N.
+
+    Why this beats heuristic selection:
+      The IEEE-CIS dataset has 339 anonymised V-columns — their names reveal
+      nothing about their value. Heuristic selection (first 50 columns) grabs
+      V1-V11, which may be less informative than V45 or V258. LightGBM quickly
+      identifies which features the trees actually use for splits.
+
+    Process:
+      1. Drop columns that are >95% missing.
+      2. Classify remaining columns as numeric or categorical.
+      3. Fit a fast LightGBM (100 trees) on the TRAINING split only.
+      4. Rank features by cumulative split gain.
+      5. Return top max_numeric numeric + top max_categorical categorical.
+    """
+    ignore = {target_col, "TransactionID"}
+    na_frac = df.isna().mean()
+    kept = [c for c in na_frac[na_frac < 0.95].index if c not in ignore]
+
+    num_cands, cat_cands = [], []
+    for col in kept:
+        dt = df[col].dtype
+        if dt == "object" or str(dt) == "category":
+            cat_cands.append(col)
+        elif np.issubdtype(dt, np.integer):
+            (cat_cands if df[col].nunique(dropna=True) <= 20 else num_cands).append(col)
+        elif np.issubdtype(dt, np.floating):
+            num_cands.append(col)
+
+    all_cands = num_cands + cat_cands
+    X = df[all_cands].copy()
+    for col in cat_cands:
+        X[col] = X[col].astype("category").cat.codes  # -1 for NaN, fine for trees
+    X = X.fillna(-999).values.astype(np.float32)
+    y = df[target_col].values
+
+    pos = (y[train_idx] == 1).sum()
+    neg = (y[train_idx] == 0).sum()
+    print("Running LightGBM for feature importance (100 trees) …")
+    lgb = LGBMClassifier(n_estimators=100, n_jobs=-1, verbose=-1,
+                          random_state=42, scale_pos_weight=neg/pos)
+    lgb.fit(X[train_idx], y[train_idx])
+
+    importance = pd.Series(lgb.feature_importances_, index=all_cands).sort_values(ascending=False)
+    num_set, cat_set = set(num_cands), set(cat_cands)
+    numeric_cols     = [c for c in importance.index if c in num_set][:max_numeric]
+    categorical_cols = [c for c in importance.index if c in cat_set][:max_categorical]
+
+    print(f"Selected {len(numeric_cols)} numeric + {len(categorical_cols)} categorical by importance")
+    print("Top 10 numeric:   ", numeric_cols[:10])
+    print("Categorical:      ", categorical_cols)
+    return numeric_cols, categorical_cols
+
+numeric_cols, categorical_cols = select_features_by_importance(
+    df, train_idx, target_col="isFraud", max_numeric=50, max_categorical=20
+)\
 '''
 
 
@@ -409,13 +477,14 @@ from sklearn.metrics import (
     roc_auc_score, average_precision_score, precision_recall_curve,
 )
 
-# Use GPU if available (CUDA on Colab, MPS on Apple Silicon, else CPU)
+# CUDA on Colab T4/A100, MPS on Apple Silicon, CPU fallback
 def get_device():
-    if torch.cuda.is_available():   return torch.device("cuda")
+    if torch.cuda.is_available():         return torch.device("cuda")
     if torch.backends.mps.is_available(): return torch.device("mps")
     return torch.device("cpu")
 
-print(f"Device: {get_device()}")\
+device = get_device()
+print(f"Device: {device}")\
 """),
 
     mc("""\
@@ -426,17 +495,21 @@ Identity features (~76% missing) are NaN where unavailable.\
     cc(LOAD_MERGED),
 
     mc("""\
-## 4 · Feature Selection
-Heuristic selection: drops >95% missing, classifies numeric vs categorical,
-caps at 50 numeric + 20 categorical columns.\
-"""),
-    cc(FEATURE_SEL),
-
-    mc("""\
-## 5 · Temporal Train / Val / Test Split
-**70 / 15 / 15** split respecting `TransactionDT` order.\
+## 4 · Temporal Train / Val / Test Split
+**70 / 15 / 15** split respecting `TransactionDT` order.
+Split is defined *before* feature selection so that LightGBM importance
+is computed on training data only — no leakage.\
 """),
     cc(SPLIT),
+
+    mc("""\
+## 5 · Feature Selection via LightGBM Importance
+Instead of heuristically taking the first 50 numeric columns (which would give
+V1–V11, not necessarily the best V-features), we run a quick 100-tree LightGBM
+and rank every candidate feature by how often it is used in splits.
+Both models use the same features for a fair comparison.\
+"""),
+    cc(FEATURE_SEL_LGBM),
 
     mc("""\
 ## 6 · Model Architecture — CustomTabTransformer
@@ -527,9 +600,9 @@ Key training decisions:
 """),
     cc('''\
 def train_tabtransformer(df, numeric_cols, categorical_cols,
-                         target_col="isFraud", batch_size=512, num_epochs=25,
+                         target_col="isFraud", batch_size=2048, num_epochs=50,
                          train_idx=None, val_idx=None, test_idx=None,
-                         early_stopping_patience=5):
+                         early_stopping_patience=10, warmup_epochs=3):
     """
     Train the CustomTabTransformer on the given DataFrame.
 
@@ -585,12 +658,19 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
     train_loader = make_loader(train_idx, shuffle=True)
     val_loader   = make_loader(val_idx,   shuffle=False)
 
-    # ── Model / optimizer / scheduler ────────────────────────────────────────
+    # ── Model / optimizer / schedulers ───────────────────────────────────────
     model     = CustomTabTransformer(vocab_sizes, len(numeric_cols)).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    # Drop LR by half only when val PR-AUC stops improving for 3 epochs
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    # LR scaled linearly with batch size (batch 2048 vs reference 512 → 4× → 2e-3 → 4e-3... use 2e-3)
+    optimizer = optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
+    # Linear warmup for first `warmup_epochs` — prevents bad early gradients
+    # from corrupting embeddings before training stabilises
+    warmup_sched = optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda ep: (ep + 1) / warmup_epochs if ep < warmup_epochs else 1.0
+    )
+    # After warmup: halve LR only when val PR-AUC stalls for 3 epochs
+    plateau_sched = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-6
     )
 
@@ -625,9 +705,13 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
         ep_true     = torch.cat(val_labels).numpy()
         ep_pr_auc   = average_precision_score(ep_true, ep_probs)
         avg_loss    = total_loss / max(n_batches, 1)
-        current_lr  = optimizer.param_groups[0]["lr"]
 
-        scheduler.step(ep_pr_auc)
+        # Warmup for first N epochs, then adaptive LR
+        if epoch <= warmup_epochs:
+            warmup_sched.step()
+        else:
+            plateau_sched.step(ep_pr_auc)
+        current_lr = optimizer.param_groups[0]["lr"]
         print(f"[Epoch {epoch:3d}] loss={avg_loss:.4f}  val_pr_auc={ep_pr_auc:.4f}  lr={current_lr:.2e}")
 
         if ep_pr_auc > best_pr_auc:
@@ -701,7 +785,10 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
 metrics, model = train_tabtransformer(
     df, numeric_cols, categorical_cols,
     target_col="isFraud",
-    num_epochs=25,
+    batch_size=2048,          # large batch — T4/A100 GPU has plenty of VRAM
+    num_epochs=50,            # more room with adaptive LR + patience=10
+    early_stopping_patience=10,
+    warmup_epochs=3,
     train_idx=train_idx, val_idx=val_idx, test_idx=test_idx,
 )\
 '''),
@@ -764,21 +851,28 @@ from sklearn.metrics import (
 )
 
 # GNN uses full-graph training — the entire 590k-node graph is passed in one
-# forward call. MPS (Apple Silicon) runs out of memory for this; CPU is
-# fast enough (~13 sec/epoch) and avoids VRAM pressure.
-# On Colab, a T4/A100 with enough VRAM could use CUDA here.
-device = torch.device("cpu")
+# forward call. On Colab T4/A100, CUDA should have enough VRAM (~4-8 GB needed).
+# Falls back to CPU if CUDA is unavailable (e.g. running locally on Apple Silicon).
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")\
 """),
 
     mc("## 3 · Load & Merge Data"),
     cc(LOAD_MERGED),
 
-    mc("## 4 · Feature Selection"),
-    cc(FEATURE_SEL),
-
-    mc("## 5 · Temporal Train / Val / Test Split"),
+    mc("""\
+## 4 · Temporal Train / Val / Test Split
+**70 / 15 / 15** split respecting `TransactionDT` order.
+Defined before feature selection so LightGBM is fit on training data only.\
+"""),
     cc(SPLIT),
+
+    mc("""\
+## 5 · Feature Selection via LightGBM Importance
+Same importance-ranked selection used by TabTransformer — both models see
+identical features for a fair comparison.\
+"""),
+    cc(FEATURE_SEL_LGBM),
 
     mc("""\
 ## 6 · Graph Construction
