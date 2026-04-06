@@ -55,17 +55,17 @@ The core idea is to treat every feature — both categorical and numeric — as 
 
 | Metric | Validation | Test |
 |---|---|---|
-| PR-AUC | 0.5261 | **0.4383** |
-| ROC-AUC | 0.8656 | 0.8373 |
-| F1 | 0.4932 | 0.4309 |
-| Recall | 0.5743 | 0.5037 |
-| Precision | 0.4321 | 0.3764 |
-| Threshold | 0.8450 | — |
+| PR-AUC | 0.5233 | **0.4140** |
+| ROC-AUC | 0.8717 | 0.8314 |
+| F1 | 0.4620 | 0.3918 |
+| Recall | 0.5842 | 0.5219 |
+| Precision | 0.3822 | 0.3136 |
+| Threshold | 0.8672 | — |
 
 **Key observations:**
-- Catches just over 50% of fraud in the test set
-- Val→test PR-AUC gap of 0.088 — some generalisation loss but reasonable for a temporal split
-- Threshold of 0.85 is realistic — the model is confident before flagging
+- Catches just over 52% of fraud in the test set
+- Val→test PR-AUC gap of 0.109 — some generalisation loss but reasonable for a temporal split
+- Threshold of 0.87 is realistic — the model is confident before flagging
 - Wins on PR-AUC, F1, and precision compared to the GNN
 
 ---
@@ -148,12 +148,12 @@ The residual connections prevent over-smoothing — without them, deep GNNs tend
 
 | Metric | TabTransformer | GNN | Winner |
 |---|---|---|---|
-| test PR-AUC | **0.4383** | 0.3695 | TabTransformer |
-| test ROC-AUC | 0.8373 | **0.8476** | GNN |
-| test Recall | 0.5037 | **0.5388** | GNN |
-| test Precision | **0.3764** | 0.2330 | TabTransformer |
-| test F1 | **0.4309** | 0.3253 | TabTransformer |
-| Val→Test gap (PR-AUC) | 0.088 | **0.041** | GNN |
+| test PR-AUC | **0.4140** | 0.3695 | TabTransformer |
+| test ROC-AUC | 0.8314 | **0.8476** | GNN |
+| test Recall | 0.5219 | **0.5388** | GNN |
+| test Precision | **0.3136** | 0.2330 | TabTransformer |
+| test F1 | **0.3918** | 0.3253 | TabTransformer |
+| Val→Test gap (PR-AUC) | 0.109 | **0.041** | GNN |
 
 **Summary:**
 TabTransformer is the stronger model overall — it identifies fraud more precisely and achieves higher PR-AUC. The GNN catches slightly more fraud in absolute terms but at the cost of a lot more false positives. The GNN's better ROC-AUC and smaller val→test gap suggest the relational graph structure does help with consistent generalisation, even if it doesn't win on the primary metric.
