@@ -463,31 +463,29 @@ print(f"  LightGBM  F1     : {lgbm_metrics['test_f1']:.4f}")\
 
 tabt_cells = [
 
-    mc("## 0 · Connect to GitHub Repo\nRun this cell at the start of every session to pull the latest code."),
+    mc("## 0 · Sync with GitHub\nI run this at the start of every session so I'm always working off the latest code."),
     cc(GIT_SETUP),
 
     mc("""\
 # TabTransformer — Attention over Categorical Features
-> **Research question:** Does applying transformer attention to categorical
-> feature embeddings capture cross-feature interactions that tree models miss?
 
-**Architecture summary**
-- Each categorical column → learned embedding vector (d=64)
-- Each numeric feature → its own projected token (one token per feature)
-- All tokens → 3-layer TransformerEncoder (4 attention heads)
-- Flattened sequence → MLP head → fraud probability
+The core idea here is to treat each feature as a *token* and let the model figure out which feature combinations matter most for a given transaction. Instead of hand-engineering interactions, I'm leaning on the transformer's self-attention to discover them automatically.
 
-**Why this might help:** Attention learns *which pairs of features* matter for a
-given transaction (e.g., card type × email domain), rather than treating features
-independently.\
+The way I built this:
+- Each categorical column gets its own learned embedding (d=64) — so `card_type` and `email_domain` live in the same vector space and can be compared directly
+- Each numeric feature also gets projected into a token — this was a deliberate choice over collapsing all numerics into one token, because it lets attention fire between individual numeric features too
+- All tokens go through 3 layers of multi-head attention (4 heads each)
+- I flatten the output and pass it through a small MLP to get the fraud probability
+
+The research question I'm trying to answer: does attention over feature tokens capture cross-feature interactions that tree models can't?\
 """),
 
     cc(INSTALL_TABT),
 
-    mc("## 1 · Data Configuration"),
+    mc("## 1 · Data Setup\nI'm pulling the raw CSVs from Google Drive and copying them to Colab's local storage — reads are much faster from local disk than Drive during training."),
     cc(DATA_SETUP),
 
-    mc("## 2 · Imports"),
+    mc("## 2 · Imports\nStandard PyTorch stack plus sklearn for metrics. I auto-detect the best available device — CUDA on Colab, MPS on Apple Silicon, CPU as fallback."),
     cc("""\
 import os
 import numpy as np
@@ -514,58 +512,38 @@ print(f"Device: {device}")\
 
     mc("""\
 ## 3 · Load & Merge Data
-Left-joins the two source files so every transaction is represented.
-Identity features (~76% missing) are NaN where unavailable.\
+The dataset comes in two files — transactions and identity records — that I join on `TransactionID`. About 76% of transactions have no identity record at all, so those rows will have NaN across all the identity columns after the merge. I cache the result as a parquet file so I'm not re-reading the raw CSVs on every run.\
 """),
     cc(LOAD_MERGED),
 
     mc("""\
 ## 4 · Temporal Train / Val / Test Split
-**70 / 15 / 15** split respecting `TransactionDT` order.
-Split is defined *before* feature selection so that LightGBM importance
-is computed on training data only — no leakage.\
+I sort by `TransactionDT` before splitting so the model always trains on older data and evaluates on newer data — the way it would work in production. A random split would leak future transactions into training and make the results look better than they actually are. I do this step *before* feature selection so that when I fit LightGBM to rank features, I'm only looking at training data.\
 """),
     cc(SPLIT),
 
     mc("""\
-## 5 · Feature Selection via LightGBM Importance
-Instead of heuristically taking the first 50 numeric columns (which would give
-V1–V11, not necessarily the best V-features), we run a quick 100-tree LightGBM
-and rank every candidate feature by how often it is used in splits.
-Both models use the same features for a fair comparison.\
+## 5 · Feature Selection
+The dataset has 339 anonymised V-columns and I have no idea which ones are useful — the names tell me nothing. Rather than blindly grabbing the first 50, I run a quick 100-tree LightGBM and let it tell me which features it actually uses for splits. I apply this same selection to both the TabTransformer and GNN so the comparison between them stays fair.\
 """),
     cc(FEATURE_SEL_LGBM),
 
     mc("""\
-## 6 · Model Architecture — CustomTabTransformer
-
-Each input feature becomes a fixed-size token:
-- **Categoricals** → learned embedding matrix (vocab_size × d_token)
-- **Numerics** → scalar multiplied by a learned weight vector, plus a bias vector
-  (one weight/bias pair per numeric feature — equivalent to a linear projection per feature)
-
-All tokens are then passed through a standard TransformerEncoder.
-The output tokens are flattened and fed to an MLP that produces a single fraud logit.\
+## 6 · Model Architecture
+I built this from scratch rather than using a library so I could control exactly how the numeric features are tokenised. The key design decision is giving each numeric feature its own weight/bias pair — this means the model learns a separate projection per feature rather than treating all numerics as one undifferentiated blob. That small change meaningfully improves what the attention layers can do with numeric data.\
 """),
     cc('''\
 class CustomTabTransformer(nn.Module):
     """
-    TabTransformer-style model built from scratch.
+    My from-scratch TabTransformer implementation.
 
-    Parameters
-    ----------
-    vocab_sizes : list[int]
-        Number of unique values for each categorical column.
-    num_numeric_features : int
-        Number of numeric input columns.
-    d_token : int
-        Embedding / token dimension (default 64).
-    n_heads : int
-        Number of attention heads (default 4). Must divide d_token evenly.
-    n_layers : int
-        Number of TransformerEncoder layers (default 3).
-    dropout : float
-        Dropout probability applied inside transformer and MLP head (default 0.1).
+    Each feature — whether categorical or numeric — becomes a d-dimensional token.
+    I pass all tokens through a standard TransformerEncoder so attention can fire
+    across any pair of features. The encoded sequence is then flattened and fed
+    into a small MLP to produce a single fraud logit.
+
+    I set dropout=0.2 (rather than the typical 0.1) because earlier runs showed
+    a noticeable val→test gap that suggested the model was overfitting.
     """
 
     def __init__(self, vocab_sizes, num_numeric_features,
@@ -612,16 +590,8 @@ class CustomTabTransformer(nn.Module):
 '''),
 
     mc("""\
-## 7 · Training Function
-
-Key training decisions:
-- **Mini-batch (512)** — full dataset is 590k rows; mini-batching is required
-- **BCEWithLogitsLoss with pos_weight** — compensates for 3.5% fraud rate
-- **AdamW + ReduceLROnPlateau** — LR halves only when val PR-AUC stops improving
-  (avoids the aggressive decay of CosineAnnealingLR which hurt performance)
-- **Early stopping (patience=5)** — saves the best checkpoint and stops if val
-  PR-AUC doesn't improve for 5 consecutive epochs
-- **Threshold tuning** — sweeps the PR curve to find the F1-maximising threshold\
+## 7 · Training Loop
+A few decisions I made here that are worth calling out. I use `ReduceLROnPlateau` instead of a fixed cosine schedule — an earlier run with cosine decay was cutting the learning rate to near-zero by epoch 12, which was clearly too aggressive. The plateau scheduler only halves the LR when validation PR-AUC actually stops improving, which is much more sensible. I also added a 3-epoch linear warmup at the start because transformers can be unstable if you hit them with full LR on the first batch. For threshold selection I optimise F2 score rather than F1 — in fraud detection, missing a fraud (false negative) is more costly than a false alarm, so I want recall weighted twice as heavily as precision.\
 """),
     cc('''\
 def train_tabtransformer(df, numeric_cols, categorical_cols,
@@ -629,12 +599,11 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
                          train_idx=None, val_idx=None, test_idx=None,
                          early_stopping_patience=10, warmup_epochs=3):
     """
-    Train the CustomTabTransformer on the given DataFrame.
+    Trains the TabTransformer and returns the best checkpoint by val PR-AUC.
 
-    Returns
-    -------
-    metrics : dict   val + test precision / recall / F1 / ROC-AUC / PR-AUC
-    model   : nn.Module   best checkpoint (highest val PR-AUC)
+    I track the best model state across all epochs and restore it at the end,
+    so early stopping doesn't discard good weights — it just stops wasting time
+    once the model has clearly plateaued.
     """
     device = get_device()
     print(f"Using device: {device}")
@@ -815,7 +784,7 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
     return metrics, model\
 '''),
 
-    mc("## 8 · Run Training"),
+    mc("## 8 · Train the Model\nEverything above was setup — this is where training actually happens. I pass the indices explicitly so the model only ever sees training data during fitting."),
     cc('''\
 metrics, model = train_tabtransformer(
     df, numeric_cols, categorical_cols,
@@ -828,7 +797,7 @@ metrics, model = train_tabtransformer(
 )\
 '''),
 
-    mc("## 9 · Results Summary"),
+    mc("## 9 · Results\nVal metrics are what drove early stopping. Test metrics are the honest numbers — the model never saw the test set during training or threshold tuning."),
     cc('''\
 print("\\n" + "="*45)
 print("  TabTransformer — Final Results")
@@ -845,37 +814,27 @@ for k, v in metrics.items():
 
 gnn_cells = [
 
-    mc("## 0 · Connect to GitHub Repo\nRun this cell at the start of every session to pull the latest code."),
+    mc("## 0 · Sync with GitHub\nI run this at the start of every session so I'm always working off the latest code."),
     cc(GIT_SETUP),
 
     mc("""\
 # Graph Neural Network — Relational Fraud Detection
-> **Research question:** Do transactions sharing identifiers (same card, email,
-> device) have correlated fraud patterns that a GNN can exploit?
 
-**Core hypothesis:** Fraudsters reuse payment instruments. If card `X` was used
-fraudulently at time T, a transaction at T+1 with the same card is more likely
-to also be fraudulent. A GNN can propagate these signals across connected nodes.
+The idea behind this model is that fraud isn't random — fraudsters reuse the same cards, devices, and email accounts across multiple transactions. If I can connect those transactions in a graph, I can let the model propagate fraud signals between related nodes rather than treating every transaction in isolation.
 
-**Architecture summary**
-- Node = transaction; edge = shared identifier (card, address, email, device)
-- Node features: numeric projection + categorical embeddings
-- 3-layer residual GNN with mean aggregation + LayerNorm
-- Node-level binary classification → fraud probability
+Every transaction is a node. I connect two nodes with an edge if they share a value in any of these identity columns: `card1`, `card4`, `card6`, `addr1`, `P_emaildomain`, `R_emaildomain`, `id_30`, `id_31`, or `DeviceInfo`. The intuition is that if transaction A and B used the same card, they're probably from the same person — and if one is fraud, that's useful information about the other.
 
-**Graph construction:** Identity-edge-only (no k-NN).
-Transactions sharing `card1`, `card4`, `card6`, `addr1`, `P_emaildomain`,
-`R_emaildomain`, `id_30`, `id_31`, or `DeviceInfo` are connected.
-- Small groups (≤10): full clique
-- Larger groups: hub + chain pattern\
+I tried k-NN edges initially (connecting transactions that are numerically similar) but abandoned it — computing nearest neighbours on 590k × 50 features is O(N²) and would take hours just to build the graph. Identity edges are O(N) and more directly encode the fraud hypothesis anyway.
+
+The model itself is a 3-layer residual GNN with mean aggregation. Each layer aggregates neighbour features, applies a linear transformation, and adds a residual connection so gradients can flow cleanly during backprop.\
 """),
 
     cc(INSTALL_GNN),
 
-    mc("## 1 · Data Configuration"),
+    mc("## 1 · Data Setup\nSame setup as the TabTransformer notebook — pulling from Drive and copying to local storage for faster reads."),
     cc(DATA_SETUP),
 
-    mc("## 2 · Imports"),
+    mc("## 2 · Imports\nI force the device selection here explicitly. The GNN runs full-graph training — the entire 590k-node graph lives in memory at once — so I need to be deliberate about where tensors land."),
     cc("""\
 import os
 import numpy as np
@@ -895,52 +854,34 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")\
 """),
 
-    mc("## 3 · Load & Merge Data"),
+    mc("## 3 · Load & Merge Data\nSame loading logic as the TabTransformer — joins transactions with identity records and caches the result."),
     cc(LOAD_MERGED),
 
-    mc("""\
-## 4 · Temporal Train / Val / Test Split
-**70 / 15 / 15** split respecting `TransactionDT` order.
-Defined before feature selection so LightGBM is fit on training data only.\
-"""),
+    mc("## 4 · Temporal Split\nI define the split before running feature selection so that when LightGBM fits to rank features, it only sees training data. Same 70/15/15 split as the TabTransformer so the comparison is apples-to-apples."),
     cc(SPLIT),
 
-    mc("""\
-## 5 · Feature Selection via LightGBM Importance
-Same importance-ranked selection used by TabTransformer — both models see
-identical features for a fair comparison.\
-"""),
+    mc("## 5 · Feature Selection\nI use the exact same LightGBM importance-based selection as the TabTransformer. Both models get the same 50 numeric + 20 categorical features — if I gave them different features the comparison would be meaningless."),
     cc(FEATURE_SEL_LGBM),
 
     mc("""\
-## 6 · Graph Construction
+## 6 · Build the Transaction Graph
+This is the step that makes the GNN fundamentally different from the TabTransformer. I'm building an `edge_index` tensor — a (2, E) matrix where each column is one directed edge — that encodes which transactions are related to which.
 
-Builds the `edge_index` tensor (shape `[2, E]`) encoding which transactions
-are connected.
-
-**Why identity edges?**
-k-NN edges (connecting numerically similar transactions) were tried but removed —
-computing nearest neighbours on 590k × 50 features is O(N²) and takes hours.
-Identity edges are O(N) and directly encode the fraud hypothesis.\
+For each identity column I group transactions by shared value and connect them. Small groups (10 or fewer) get fully connected into a clique. Larger groups get a hub-and-spoke structure with a chain connecting sequential members — this keeps the edge count linear in group size rather than quadratic, which matters a lot at 590k nodes.\
 """),
     cc('''\
 def build_transaction_graph(df, min_group_size=2, max_group_size=1000,
                              small_group_full_connect=10):
     """
-    Build the transaction graph from shared identifiers.
+    Builds the transaction graph from shared identity columns.
 
-    For each identity column (card1, addr1, email, device, etc.):
-      - Group transactions that share the same value.
-      - Skip NaN groups (transactions sharing only "unknown" are not related).
-      - Small groups (≤ small_group_full_connect): fully connect (clique).
-      - Larger groups: hub-and-spoke + sequential chain to limit edge count.
+    I skip NaN groups deliberately — if two transactions both lack a card number,
+    that doesn't mean they're related, it just means we don't have the data.
+    Connecting unknown-to-unknown would add noise rather than signal.
 
-    Self-loops are added so each node can attend to its own features during
-    message passing.
-
-    Returns
-    -------
-    edge_index : LongTensor  shape (2, E)
+    Self-loops are added so each node aggregates its own features alongside
+    its neighbours during message passing — without them a node has no way
+    to preserve its own representation across layers.
     """
     df = df.reset_index(drop=True)
     src_list, dst_list = [], []
@@ -990,32 +931,19 @@ print(f"edge_index shape: {edge_index.shape}  ({edge_index.shape[1]:,} edges)")\
 '''),
 
     mc("""\
-## 7 · Model Architecture — SimpleGNN
+## 7 · Model Architecture
+The model has two distinct phases. First, I encode each transaction's raw features into a shared embedding space using a numeric projection and per-column categorical embeddings. Then I run three rounds of message passing where each node aggregates the mean of its neighbours' representations, applies a linear transformation, and adds a residual connection back to itself.
 
-A 3-layer residual GNN with mean aggregation.
-
-**Message passing (mean aggregation):**
-For each node `v`, the new representation is the mean of its neighbours\' features:
-`h_v' = mean({ h_u : u ∈ N(v) })`
-Then: `h_v = ReLU(W · h_v') + h_v` (residual connection preserves local info)\
+The residual connections are important here — without them, deep GNNs tend to "over-smooth" where every node ends up with roughly the same representation regardless of its local neighbourhood. The LayerNorm after each layer helps with training stability.\
 """),
     cc('''\
 class SimpleGNN(nn.Module):
     """
-    3-layer residual GNN for node-level fraud classification.
+    My 3-layer residual GNN for node-level fraud classification.
 
-    Parameters
-    ----------
-    num_numeric : int
-        Number of numeric input features per node.
-    num_categories_per_col : list[int]
-        Vocabulary sizes for each categorical column.
-    embed_dim : int
-        Embedding dimension for numeric projection and categorical embeddings.
-    hidden_dim : int
-        Hidden dimension used throughout the GNN layers.
-    dropout : float
-        Dropout probability (applied after each GNN layer).
+    I set hidden_dim=128 rather than 256 — at 590k nodes the graph structure
+    is doing the heavy lifting, not raw model capacity, and the smaller size
+    keeps memory manageable for full-graph training on a single GPU.
     """
 
     def __init__(self, num_numeric, num_categories_per_col,
@@ -1078,13 +1006,10 @@ class SimpleGNN(nn.Module):
 '''),
 
     mc("""\
-## 8 · Training Function
+## 8 · Training Loop
+The biggest difference from the TabTransformer is that I can't mini-batch here. The GNN needs the full graph in memory at once because message passing requires knowing every node's neighbours — if I only loaded a subset of nodes, the neighbourhood information would be incomplete. That means every forward pass touches all 590k nodes and all edges.
 
-Key differences from TabTransformer training:
-- **Full-graph training** — the entire graph is passed to the model in one call
-  (no mini-batching; the GNN needs global message-passing context)
-- **Early stopping with patience=20** — GNN converges more slowly than mini-batch models
-- **150–250 epochs** recommended; the model was still improving at epoch 150\
+Because of this, I use a higher early stopping patience (20 epochs) — GNNs converge more slowly than mini-batch models and I don't want to stop prematurely. Same label smoothing and F2 threshold tuning as the TabTransformer.\
 """),
     cc('''\
 def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
@@ -1093,14 +1018,9 @@ def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
     """
     Full-graph training of the SimpleGNN.
 
-    The entire graph (all 590k nodes + edges) is used in every forward pass.
-    This is memory-intensive but necessary because GNN message passing needs
-    global context — mini-batching would require graph partitioning (not implemented).
-
-    Returns
-    -------
-    metrics : dict
-    model   : SimpleGNN (best checkpoint)
+    I save the best model state to CPU after each improvement so I'm not
+    accumulating multiple copies of the weights in GPU memory across epochs.
+    At restore time I move the state back to the device before loading.
     """
     cols = numeric_cols + categorical_cols + [target_col]
     df   = df[cols].copy().reset_index(drop=True)
@@ -1221,11 +1141,9 @@ def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
     return metrics, model\
 '''),
 
-    mc("## 9 · Run Training"),
+    mc("## 9 · Train the Model\nGraph construction takes a few minutes — it's scanning all 590k rows for shared identity values. Training itself should be around 5 seconds per epoch on CUDA. Early stopping will likely kick in well before epoch 100."),
     cc('''\
-# NOTE: Building the graph takes ~2-3 minutes.
-# Training is ~5 sec/epoch on CUDA with hidden_dim=128.
-# 100 epochs max; early stopping (patience=20) will likely stop around epoch 60-80.
+# Graph construction: ~2-3 min. Training: ~5 sec/epoch. Expected total: ~10-15 min.
 print("Building graph …")
 edge_index = build_transaction_graph(df)
 print(f"Graph built: {edge_index.shape[1]:,} edges")
@@ -1238,7 +1156,7 @@ gnn_metrics, gnn_model = train_gnn(
 )\
 '''),
 
-    mc("## 10 · Results Summary"),
+    mc("## 10 · Results\nVal metrics guided training. Test metrics are what matter — the model never touched the test set until this final evaluation."),
     cc('''\
 print("\\n" + "="*45)
 print("  GNN — Final Results")
