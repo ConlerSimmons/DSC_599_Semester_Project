@@ -1061,10 +1061,9 @@ def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
     x_num, x_cat, y, ei = x_num.to(device), x_cat.to(device), y.to(device), ei.to(device)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    # hidden_dim=128 (down from 256) — halves memory, ~2x faster per epoch,
-    # modest accuracy tradeoff. At 590k nodes the graph structure does the
-    # heavy lifting, not model capacity.
-    model = SimpleGNN(len(numeric_cols), cat_sizes, hidden_dim=128).to(device)
+    # hidden_dim=256 — mean aggregation is memory-efficient enough to support
+    # full capacity. Only dropped to 128 when attention aggregation caused OOM.
+    model = SimpleGNN(len(numeric_cols), cat_sizes, hidden_dim=256).to(device)
     pos   = (y[tr] == 1).sum(); neg = (y[tr] == 0).sum()
     criterion = nn.BCEWithLogitsLoss(pos_weight=(neg / pos).clamp(min=1.0))
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
