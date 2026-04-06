@@ -1,234 +1,99 @@
-# DSC 599 – Fraud Detection Using Deep Tabular Models  
-### Custom TabTransformer + Graph Neural Network Pipelines
+# DSC 599 — Fraud Detection: TabTransformer vs GNN
 
-This project is the final capstone work for my DSC 599 course. I built and compared two modern deep learning architectures for fraud detection on the IEEE-CIS dataset: a **Custom TabTransformer** and a **Custom Graph Neural Network (GNN)**. Both models were created entirely from scratch and trained on highly imbalanced financial transaction data.
+This is my capstone project for DSC 599. The research question I'm investigating is whether modern deep learning architectures — specifically attention-based and graph-based models — capture fraud patterns in financial transaction data that traditional methods can't. I built both models entirely from scratch so I could understand every design decision, rather than treating them as black boxes.
 
----
-
-## Project Overview
-
-The goal of this project was to understand how different modern architectures handle structured, high-dimensional, and extremely imbalanced tabular data. Fraud detection is a domain where **relationships** between features often matter more than the features themselves, and the signal is subtle and rare.
-
-I implemented two pipelines:
-
-1. **TabTransformer** – A model that uses **transformer attention** to capture cross-feature interactions among categorical variables while projecting numeric variables through an MLP.
-2. **Graph Neural Network (GNN)** – A model that treats each transaction as a **node in a graph**, connecting nodes via similarity (k-NN) and shared identity/device attributes.
-
-Each model is trained independently and produces separate evaluation metrics, which I compare in my final report and presentation.
+The dataset is the [IEEE-CIS Fraud Detection](https://www.kaggle.com/c/ieee-fraud-detection) dataset: 590,540 transactions, 3.5% fraud rate, 434 features after merging the transaction and identity tables.
 
 ---
 
-## Directory Structure
+## The Two Models
+
+### TabTransformer
+I treat every feature as a token and let transformer attention learn which feature combinations are suspicious. Each categorical column gets an embedding, each numeric feature gets its own linear projection, and all 70 tokens flow through 3 transformer encoder layers before a classification head produces a fraud probability. The key insight is that attention can discover interactions like "card type X + email domain Y + device Z" without me telling it those combinations matter.
+
+### GNN
+I build a graph where each transaction is a node, and two nodes are connected if they share an identity attribute — same card, same email domain, same device, etc. The intuition is that fraudsters reuse payment instruments, so if card X was used fraudulently once, every other transaction on that card deserves elevated suspicion. A 3-layer residual GNN propagates these signals across connected nodes through mean aggregation.
+
+---
+
+## Results
+
+Both models use the same 70/15/15 temporal split (sorted by `TransactionDT`) and the same LightGBM importance-ranked feature set (50 numeric + 20 categorical). Primary metric is **PR-AUC** — accuracy is meaningless at 3.5% fraud rate.
+
+| Metric | TabTransformer | GNN |
+|---|---|---|
+| **test PR-AUC** | **0.4383** | 0.3695 |
+| test ROC-AUC | 0.8373 | **0.8476** |
+| test Recall | 0.5037 | **0.5388** |
+| test Precision | **0.3764** | 0.2330 |
+| test F1 | **0.4309** | 0.3253 |
+
+TabTransformer wins on most metrics. The GNN catches slightly more fraud (higher recall) but with more false positives. Both perform roughly 10–12× above random (random PR-AUC ≈ 0.035). For a full breakdown see [`ARCHITECTURE_REPORT.md`](ARCHITECTURE_REPORT.md).
+
+---
+
+## Project Structure
 
 ```
-DSC_599_Semester_Project
-│
-├── data/
-│   └── raw/              # IEEE-CIS fraud dataset (train_transaction + train_identity)
-│
 ├── src/
-│   ├── data_loading.py   # Handles merging + preprocessing of original Kaggle files
-│   ├── feature_selection.py
-│   ├── utils_metrics.py
+│   ├── data_loading.py                    # Merge + cache the two raw CSVs
+│   ├── feature_selection.py               # LightGBM importance-based feature ranking
+│   ├── utils_metrics.py                   # Shared device detection utility
 │   │
 │   ├── tabtransformer_custom/
-│   │   ├── model_custom.py     # Custom TabTransformer implementation
-│   │   └── train_custom.py     # Training loop + metrics for the TabTransformer
+│   │   ├── model_custom.py                # CustomTabTransformer architecture
+│   │   └── train_custom.py                # Training loop, early stopping, F2 threshold
 │   │
 │   └── gnn_custom/
-│       ├── graph_utils.py      # Graph construction (kNN + identity/device edges)
-│       ├── gnn_model.py        # Multi-layer GNN with residuals, dropout, layer norm
-│       └── train_gnn.py        # Training pipeline + adaptive thresholding
+│       ├── graph_utils.py                 # Identity-edge graph construction
+│       ├── gnn_model.py                   # 3-layer residual GNN
+│       └── train_gnn.py                   # Full-graph training loop
 │
-├── run_tabTransformer.py       # Runner script for the custom TabTransformer
-├── run_gnn.py                  # Runner script for the custom GNN
-│
-├── lightning_logs/             # TabTransformer training logs
-├── saved_models/               # Serialized model checkpoints
-│
+├── run_tabTransformer.py                  # Entry point — TabTransformer
+├── run_gnn.py                             # Entry point — GNN
+├── run_baseline.py                        # XGBoost + LightGBM baselines
+├── ARCHITECTURE_REPORT.md                 # Full architecture + performance writeup
 └── requirements.txt
 ```
 
 ---
 
-## System Architecture
+## Running Locally
 
-### **1. Data Loading + Preprocessing**
-All models use a unified loading function:
-
-- Merges `train_transaction.csv` and `train_identity.csv`
-- Handles missing values
-- Standardizes numeric features
-- Converts categorical strings into indices
-- Maintains consistent row ordering so node IDs map cleanly in the GNN
-
----
-
-# TabTransformer Architecture
-
-My **TabTransformer** follows the design proposed by Google Research but implemented manually:
-
-- **Categorical embeddings** (one per column)
-- **Transformer encoder layers** to learn cross-feature interactions  
-- **Numeric features** projected through an MLP
-- Concatenation → classification head
-- **Class imbalance handling** with `pos_weight`
-- **Evaluation metrics**: precision, recall, F1, ROC-AUC, PR-AUC
-
-This model tends to **favor recall** because attention layers let it “spread” anomaly signals across categorical interactions.
-
-To run:
-
-```
-python run_tabTransformer.py
-```
-
----
-
-# Graph Neural Network (GNN) Architecture
-
-The GNN pipeline has three major parts:
-
----
-
-## **A. Graph Construction (`graph_utils.py`)**
-
-Each transaction becomes a node.  
-Edges come from:
-
-1. **k-Nearest Neighbor edges (numeric similarity)**  
-2. **Identity/device clusters**  
-   - `card1`
-   - `addr1`
-   - `P_emaildomain`
-   - `id_30` (OS)
-   - `id_31` (browser)
-   - `DeviceInfo`
-
-Small groups become full cliques, mid-sized groups form hub-and-chain patterns, and very large clusters are ignored to avoid blowing up the graph.
-
-Self-loops are added for stability.
-
----
-
-## **B. GNN Model (`gnn_model.py`)**
-
-The final architecture uses:
-
-- **Numeric + categorical embeddings**
-- **Two GCN-style message passing layers**
-- **Residual connections**
-- **Layer normalization**
-- **Dropout**
-- **A final linear classifier**
-
-This architecture was chosen because deeper GCNs quickly oversmooth on this dataset and because the identity-based graph structure benefits from residual learning.
-
----
-
-## **C. Training Pipeline (`train_gnn.py`)**
-
-Features of the training loop:
-
-- Full-batch gradient descent (graph-sized)
-- `BCEWithLogitsLoss` with **dynamic pos_weight**
-- 50 epochs by default
-- **Best threshold search** using precision-recall curve
-- Output:  
-  - precision  
-  - recall  
-  - F1  
-  - ROC-AUC  
-  - PR-AUC  
-  - learned optimal threshold
-
-To run:
-
-```
-python run_gnn.py
-```
-
----
-
-# Model Behavior Summary
-
-From the latest evaluations:
-
-### **GNN**
-- Precision: ~0.23–0.25  
-- Recall: ~0.27–0.33  
-- ROC-AUC: ~0.80  
-- PR-AUC: ~0.17–0.18  
-
-### **TabTransformer**  
-*(Numbers depend on your upcoming overnight run)*
-
-Historically:
-- Higher recall  
-- ROC-AUC in the mid-.70s to high-.70s  
-- PR-AUC lower than the GNN  
-
-Together, these models demonstrate **two fundamentally different strengths**:
-- TabTransformer generalizes anomalies across categorical interactions.
-- GNN isolates cleaner clusters of fraudulent behavior through graph structure.
-
----
-
-# Future Work
-
-Based on this semester’s experiments, the next steps for improving both models would be:
-
-### **TabTransformer**
-- Increase transformer depth (up to 6–8 layers)
-- Add stochastic depth + stronger regularization
-- Use embeddings tied across semantically related categories
-
-### **GNN**
-- Move to **PyTorch Geometric**
-- Replace mean-GCN with GraphSAGE or GAT
-- Expand graph construction using:
-  - time-window co-occurrence
-  - more identity relationships
-  - behavior-based similarity edges
-- Mini-batch sampling (GraphSAINT / Cluster-GCN)
-
-These would push both models closer to Kaggle SOTA.
-
----
-
-# Reproducibility — Setup Instructions
-
-### 1. Create & activate a virtual environment
-```
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-### 2. Install dependencies
-```
 pip install -r requirements.txt
 ```
 
-### 3. Make sure the dataset is placed here:
+Place the raw data files at:
 ```
 data/raw/train_transaction.csv
 data/raw/train_identity.csv
 ```
 
-### 4. Train models
-```
+Then run either model:
+```bash
 python run_tabTransformer.py
 python run_gnn.py
 ```
 
----
-
-# Final Remarks
-
-This repository reflects my full end-to-end development of two deep architectures from scratch. I intentionally avoided pre-built frameworks (like PyTorch Geometric or TabNet) so I could understand the mechanics behind attention, graph message passing, and adaptive thresholding in imbalanced classification.
-
-In my accompanying report and presentation, I walk through why each model was designed the way it was, how different architectural decisions affect performance, and how future iterations could move toward production-quality fraud detection systems.
+Logs are written to `results/logs/`. The first run merges and caches the data to `data/interim/merged_train.parquet` so subsequent runs load instantly.
 
 ---
 
-If you have any questions about the implementation, model design choices, or future scalability considerations, feel free to reach out.
+## Key Design Decisions Worth Noting
+
+**Why I dropped k-NN edges from the GNN:** Computing nearest neighbours on 590k × 50 features is O(N²) — it would take hours just to build the graph. Identity edges are O(N) and more directly encode the fraud hypothesis anyway.
+
+**Why PR-AUC over accuracy:** At 3.5% fraud rate, a model that predicts "not fraud" on everything scores 96.5% accuracy. PR-AUC measures the precision-recall tradeoff across all thresholds and is robust to class imbalance.
+
+**Why F2 for threshold tuning:** In fraud detection, missing a fraud (false negative) is more costly than a false alarm. F2 weights recall twice as heavily as precision when finding the optimal operating threshold.
+
+**Why full-graph training for the GNN:** Message passing requires knowing every node's neighbours simultaneously. Mini-batching would require graph partitioning (e.g. PyTorch Geometric's NeighborSampler), which is a significant rewrite. Full-graph training works fine on a GPU with enough VRAM.
+
+---
+
+## The `colab` Branch
+
+There's a `colab` branch with self-contained Jupyter notebooks for running everything in Google Colab. Each notebook handles its own data loading, feature selection, model definition, and training — no local setup required beyond uploading the raw CSVs to Google Drive.
