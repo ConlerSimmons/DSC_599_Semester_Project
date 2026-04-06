@@ -45,6 +45,26 @@ INSTALL_BASELINE = """\
 !pip install -q xgboost lightgbm pyarrow pandas numpy scikit-learn\
 """
 
+GIT_SETUP = """\
+# ── Pull latest code from GitHub (run at the start of every session) ──────────
+import os
+
+if os.path.exists("DSC_599_Semester_Project"):
+    # Repo already cloned — just pull the latest changes
+    %cd DSC_599_Semester_Project
+    !git pull origin colab
+else:
+    # First time — clone and switch to the colab branch
+    !git clone https://github.com/ConlerSimmons/DSC_599_Semester_Project.git
+    %cd DSC_599_Semester_Project
+    !git checkout colab
+
+print("\\nCurrent branch:")
+!git branch --show-current
+print("Latest commit:")
+!git log --oneline -1\
+"""
+
 INSTALL_TABT = """\
 # Install required packages (run once in Colab)
 !pip install -q torch pandas numpy scikit-learn pyarrow lightgbm\
@@ -443,6 +463,9 @@ print(f"  LightGBM  F1     : {lgbm_metrics['test_f1']:.4f}")\
 
 tabt_cells = [
 
+    mc("## 0 · Connect to GitHub Repo\nRun this cell at the start of every session to pull the latest code."),
+    cc(GIT_SETUP),
+
     mc("""\
 # TabTransformer — Attention over Categorical Features
 > **Research question:** Does applying transformer attention to categorical
@@ -821,6 +844,9 @@ for k, v in metrics.items():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 gnn_cells = [
+
+    mc("## 0 · Connect to GitHub Repo\nRun this cell at the start of every session to pull the latest code."),
+    cc(GIT_SETUP),
 
     mc("""\
 # Graph Neural Network — Relational Fraud Detection
