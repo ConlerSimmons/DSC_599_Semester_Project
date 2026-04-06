@@ -1021,29 +1021,34 @@ class SimpleGNN(nn.Module):
         self.act        = nn.ReLU()
         self.out_linear = nn.Linear(hidden_dim, 1)
 
-    def _attn_agg(self, x, edge_index, attn_linear):
+    def _attn_agg(self, x, edge_index, attn_linear, chunk_size=500_000):
         """
-        Attention-weighted neighbour aggregation.
+        Attention-weighted neighbour aggregation processed in chunks.
 
-        For each edge (src → dst), compute a scalar attention weight from the
-        concatenation of src and dst features. Aggregate neighbour features
-        weighted by their attention scores (normalised per destination node).
+        Computing attention scores for all edges at once creates a tensor of
+        shape (E, 2*H) — with ~20M edges and H=256 that is ~40GB, causing OOM.
+        Processing in chunks of 500k edges at a time keeps peak memory ~1GB.
 
-        Replaces mean aggregation, which dilutes fraud signal when a fraud node
-        is connected to many legitimate neighbours.
+        For each edge (src → dst): score = sigmoid(W · [src_feat || dst_feat])
+        Then aggregate: h_dst = sum(score * h_src) / sum(score)
         """
         if edge_index.numel() == 0:
             return x
-        src, dst = edge_index
-        # Score each edge: how relevant is src to dst?
-        edge_feat  = torch.cat([x[src], x[dst]], dim=-1)   # (E, 2H)
-        attn_score = torch.sigmoid(attn_linear(edge_feat).squeeze(-1))  # (E,)
-        # Weighted sum of neighbour features
+        src, dst   = edge_index
+        n          = x.size(0)
         agg        = torch.zeros_like(x)
-        agg.index_add_(0, dst, x[src] * attn_score.unsqueeze(1))
-        # Normalise by total attention weight per node
-        attn_sum   = torch.zeros(x.size(0), device=x.device)
-        attn_sum.index_add_(0, dst, attn_score)
+        attn_sum   = torch.zeros(n, device=x.device)
+
+        for start in range(0, src.size(0), chunk_size):
+            end   = min(start + chunk_size, src.size(0))
+            s, d  = src[start:end], dst[start:end]
+            score = torch.sigmoid(
+                attn_linear(torch.cat([x[s], x[d]], dim=-1)).squeeze(-1)
+            )
+            agg.index_add_(0, d, x[s] * score.unsqueeze(1))
+            attn_sum.index_add_(0, d, score)
+            del score
+
         return agg / attn_sum.clamp_min(1e-6).unsqueeze(1)
 
     def forward(self, x_num, x_cat, edge_index):
