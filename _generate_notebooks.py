@@ -661,10 +661,11 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
     val_loader   = make_loader(val_idx,   shuffle=False)
 
     # ── Model / optimizer / schedulers ───────────────────────────────────────
-    model     = CustomTabTransformer(vocab_sizes, len(numeric_cols)).to(device)
+    # dropout=0.2 (up from 0.1) — reduces the large val→test gap seen in previous runs
+    model     = CustomTabTransformer(vocab_sizes, len(numeric_cols), dropout=0.2).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    # LR scaled linearly with batch size (batch 2048 vs reference 512 → 4× → 2e-3 → 4e-3... use 2e-3)
-    optimizer = optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
+    # weight_decay=3e-4 (up from 1e-4) — extra regularisation to improve generalisation
+    optimizer = optim.AdamW(model.parameters(), lr=2e-3, weight_decay=3e-4)
     # Linear warmup for first `warmup_epochs` — prevents bad early gradients
     # from corrupting embeddings before training stabilises
     warmup_sched = optim.lr_scheduler.LambdaLR(
@@ -685,7 +686,11 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
         for bx_num, bx_cat, by in train_loader:
             bx_num, bx_cat, by = bx_num.to(device), bx_cat.to(device), by.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(bx_num, bx_cat), by)
+            # Label smoothing: 0→0.05, 1→0.95 — reduces overconfidence and lowers
+            # the extreme threshold (0.97+) seen in unsmoothed runs
+            smooth = 0.05
+            by_smooth = by * (1 - smooth) + smooth * 0.5
+            loss = criterion(model(bx_num, bx_cat), by_smooth)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -740,8 +745,13 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
     y_true  = torch.cat(all_labels).numpy()
 
     precs, recs, thrs = precision_recall_curve(y_true, y_score)
-    f1s = 2 * precs[:-1] * recs[:-1] / (precs[:-1] + recs[:-1] + 1e-8)
-    best_thr = float(thrs[f1s.argmax()])
+    # F2 score: weights recall 2× over precision — correct tradeoff for fraud detection
+    # where missing fraud (false negative) is more costly than a false alarm
+    beta = 2
+    f2s  = (1 + beta**2) * precs[:-1] * recs[:-1] / (
+        beta**2 * precs[:-1] + recs[:-1] + 1e-8
+    )
+    best_thr = float(thrs[f2s.argmax()])
     y_pred   = (y_score >= best_thr).astype(float)
 
     metrics = {
@@ -1001,20 +1011,40 @@ class SimpleGNN(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.norm3 = nn.LayerNorm(hidden_dim)
-        self.dropout   = nn.Dropout(dropout)
-        self.act       = nn.ReLU()
+        # Attention scorer per layer: takes [src || dst] → scalar weight
+        # This replaces mean aggregation — lets the model learn which neighbours
+        # carry stronger fraud signal rather than averaging all equally
+        self.attn1 = nn.Linear(2 * hidden_dim, 1)
+        self.attn2 = nn.Linear(2 * hidden_dim, 1)
+        self.attn3 = nn.Linear(2 * hidden_dim, 1)
+        self.dropout    = nn.Dropout(dropout)
+        self.act        = nn.ReLU()
         self.out_linear = nn.Linear(hidden_dim, 1)
 
-    def _mean_agg(self, x, edge_index):
-        """Mean-aggregate neighbour features for each node."""
-        if edge_index.numel() == 0: return x
+    def _attn_agg(self, x, edge_index, attn_linear):
+        """
+        Attention-weighted neighbour aggregation.
+
+        For each edge (src → dst), compute a scalar attention weight from the
+        concatenation of src and dst features. Aggregate neighbour features
+        weighted by their attention scores (normalised per destination node).
+
+        Replaces mean aggregation, which dilutes fraud signal when a fraud node
+        is connected to many legitimate neighbours.
+        """
+        if edge_index.numel() == 0:
+            return x
         src, dst = edge_index
-        agg = torch.zeros_like(x)
-        agg.index_add_(0, dst, x[src])
-        deg = torch.zeros(x.size(0), device=x.device).index_add_(
-            0, dst, torch.ones(len(dst), device=x.device)
-        ).clamp_min(1.0).unsqueeze(1)
-        return agg / deg
+        # Score each edge: how relevant is src to dst?
+        edge_feat  = torch.cat([x[src], x[dst]], dim=-1)   # (E, 2H)
+        attn_score = torch.sigmoid(attn_linear(edge_feat).squeeze(-1))  # (E,)
+        # Weighted sum of neighbour features
+        agg        = torch.zeros_like(x)
+        agg.index_add_(0, dst, x[src] * attn_score.unsqueeze(1))
+        # Normalise by total attention weight per node
+        attn_sum   = torch.zeros(x.size(0), device=x.device)
+        attn_sum.index_add_(0, dst, attn_score)
+        return agg / attn_sum.clamp_min(1e-6).unsqueeze(1)
 
     def forward(self, x_num, x_cat, edge_index):
         # Encode features into a shared embedding space
@@ -1026,12 +1056,12 @@ class SimpleGNN(nn.Module):
         )
         h = self.act(self.input_linear(h))
 
-        # Three residual message-passing layers
-        for gcn, norm in [(self.gcn1, self.norm1),
-                          (self.gcn2, self.norm2),
-                          (self.gcn3, self.norm3)]:
+        # Three residual attention-aggregation layers
+        for gcn, norm, attn in [(self.gcn1, self.norm1, self.attn1),
+                                 (self.gcn2, self.norm2, self.attn2),
+                                 (self.gcn3, self.norm3, self.attn3)]:
             h_res = h
-            h     = self.dropout(self.act(gcn(self._mean_agg(h, edge_index))))
+            h     = self.dropout(self.act(gcn(self._attn_agg(h, edge_index, attn))))
             h     = norm(h + h_res)
 
         return self.out_linear(h).squeeze(-1)\
@@ -1111,8 +1141,11 @@ def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
 
     for epoch in range(1, num_epochs + 1):
         model.train(); optimizer.zero_grad()
-        logits = model(x_num, x_cat, ei)
-        loss   = criterion(logits[tr], y[tr])
+        logits   = model(x_num, x_cat, ei)
+        # Label smoothing: softens 0→0.05 and 1→0.95 to reduce overconfidence
+        smooth   = 0.05
+        y_smooth = y[tr] * (1 - smooth) + smooth * 0.5
+        loss     = criterion(logits[tr], y_smooth)
         if not torch.isfinite(loss): print(f"Non-finite loss at epoch {epoch}"); break
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1146,8 +1179,12 @@ def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
         yt = y[idx_tensor].cpu().numpy()
         ys = probs[idx_tensor].cpu().numpy()
         precs, recs, thrs = precision_recall_curve(yt, ys)
-        f1s = 2 * precs[:-1] * recs[:-1] / (precs[:-1] + recs[:-1] + 1e-8)
-        thr = float(thrs[f1s.argmax()])
+        # F2 score — weights recall 2× over precision for fraud detection
+        beta = 2
+        f2s  = (1 + beta**2) * precs[:-1] * recs[:-1] / (
+            beta**2 * precs[:-1] + recs[:-1] + 1e-8
+        )
+        thr = float(thrs[f2s.argmax()])
         yp  = (ys >= thr).astype("int32")
         return {
             f"{label}_precision": precision_score(yt, yp, zero_division=0),
