@@ -542,8 +542,9 @@ class CustomTabTransformer(nn.Module):
     across any pair of features. The encoded sequence is then flattened and fed
     into a small MLP to produce a single fraud logit.
 
-    I set dropout=0.2 (rather than the typical 0.1) because earlier runs showed
-    a noticeable val→test gap that suggested the model was overfitting.
+    I set dropout=0.3 (rather than the typical 0.1) because earlier runs showed
+    a persistent val→test gap (0.109 PR-AUC) indicating overfitting. Stronger
+    dropout combined with weight_decay=1e-3 is the targeted fix.
     """
 
     def __init__(self, vocab_sizes, num_numeric_features,
@@ -653,11 +654,11 @@ def train_tabtransformer(df, numeric_cols, categorical_cols,
     val_loader   = make_loader(val_idx,   shuffle=False)
 
     # ── Model / optimizer / schedulers ───────────────────────────────────────
-    # dropout=0.2 (up from 0.1) — reduces the large val→test gap seen in previous runs
-    model     = CustomTabTransformer(vocab_sizes, len(numeric_cols), dropout=0.2).to(device)
+    # dropout=0.3 (up from 0.2) — tighter regularisation to close the val→test gap
+    model     = CustomTabTransformer(vocab_sizes, len(numeric_cols), dropout=0.3).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    # weight_decay=3e-4 (up from 1e-4) — extra regularisation to improve generalisation
-    optimizer = optim.AdamW(model.parameters(), lr=2e-3, weight_decay=3e-4)
+    # weight_decay=1e-3 (up from 3e-4) — stronger L2 penalty to reduce overfitting
+    optimizer = optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-3)
     # Linear warmup for first `warmup_epochs` — prevents bad early gradients
     # from corrupting embeddings before training stabilises
     warmup_sched = optim.lr_scheduler.LambdaLR(
