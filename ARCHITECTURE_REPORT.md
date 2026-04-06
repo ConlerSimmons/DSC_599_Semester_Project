@@ -55,17 +55,17 @@ The core idea is to treat every feature — both categorical and numeric — as 
 
 | Metric | Validation | Test |
 |---|---|---|
-| PR-AUC | 0.5233 | **0.4140** |
-| ROC-AUC | 0.8717 | 0.8314 |
-| F1 | 0.4620 | 0.3918 |
-| Recall | 0.5842 | 0.5219 |
-| Precision | 0.3822 | 0.3136 |
-| Threshold | 0.8672 | — |
+| PR-AUC | 0.5385 | **0.4402** |
+| ROC-AUC | 0.8817 | 0.8471 |
+| F1 | 0.4606 | 0.4036 |
+| Recall | 0.6072 | 0.5495 |
+| Precision | 0.3710 | 0.3190 |
+| Threshold | 0.8113 | — |
 
 **Key observations:**
-- Catches just over 52% of fraud in the test set
-- Val→test PR-AUC gap of 0.109 — some generalisation loss but reasonable for a temporal split
-- Threshold of 0.87 is realistic — the model is confident before flagging
+- Catches 55% of fraud in the test set
+- Val→test PR-AUC gap of 0.098 — narrowed from 0.109 after increasing dropout to 0.3 and weight_decay to 1e-3
+- Threshold of 0.81 — the model is confident before flagging
 - Wins on PR-AUC, F1, and precision compared to the GNN
 
 ---
@@ -147,15 +147,15 @@ The residual connections prevent over-smoothing — without them, deep GNNs tend
 
 | Metric | TabTransformer | GNN | Winner |
 |---|---|---|---|
-| test PR-AUC | **0.4140** | 0.3437 | TabTransformer |
-| test ROC-AUC | **0.8314** | 0.8317 | Tie |
-| test Recall | 0.5219 | **0.5644** | GNN |
-| test Precision | **0.3136** | 0.2012 | TabTransformer |
-| test F1 | **0.3918** | 0.2967 | TabTransformer |
-| Val→Test gap (PR-AUC) | 0.109 | **0.071** | GNN |
+| test PR-AUC | **0.4402** | 0.3437 | TabTransformer |
+| test ROC-AUC | **0.8471** | 0.8317 | TabTransformer |
+| test Recall | 0.5495 | **0.5644** | GNN |
+| test Precision | **0.3190** | 0.2012 | TabTransformer |
+| test F1 | **0.4036** | 0.2967 | TabTransformer |
+| Val→Test gap (PR-AUC) | 0.098 | **0.071** | GNN |
 
 **Summary:**
-TabTransformer is the stronger model overall — it identifies fraud more precisely and achieves higher PR-AUC, F1, and precision. The GNN catches more fraud in absolute terms (56% vs 52% recall) but at the cost of significantly more false positives. ROC-AUC is essentially tied. The GNN's smaller val→test gap suggests the relational structure generalises more consistently, even though it doesn't win on the primary metric.
+TabTransformer is the stronger model overall — it wins on PR-AUC, ROC-AUC, F1, and precision. The GNN catches marginally more fraud (56% vs 55% recall) but at the cost of significantly more false positives. The GNN's smaller val→test gap (0.071 vs 0.098) suggests the relational graph structure generalises more consistently across time, even though it doesn't win on the primary metric.
 
 Both models perform roughly 10–12× better than random (random PR-AUC ≈ 0.035 at 3.5% fraud rate).
 
