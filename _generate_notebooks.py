@@ -1011,45 +1011,24 @@ class SimpleGNN(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.norm3 = nn.LayerNorm(hidden_dim)
-        # Attention scorer per layer: takes [src || dst] → scalar weight
-        # This replaces mean aggregation — lets the model learn which neighbours
-        # carry stronger fraud signal rather than averaging all equally
-        self.attn1 = nn.Linear(2 * hidden_dim, 1)
-        self.attn2 = nn.Linear(2 * hidden_dim, 1)
-        self.attn3 = nn.Linear(2 * hidden_dim, 1)
         self.dropout    = nn.Dropout(dropout)
         self.act        = nn.ReLU()
         self.out_linear = nn.Linear(hidden_dim, 1)
 
-    def _attn_agg(self, x, edge_index, attn_linear, chunk_size=500_000):
+    def _mean_agg(self, x, edge_index):
         """
-        Attention-weighted neighbour aggregation processed in chunks.
-
-        Computing attention scores for all edges at once creates a tensor of
-        shape (E, 2*H) — with ~20M edges and H=256 that is ~40GB, causing OOM.
-        Processing in chunks of 500k edges at a time keeps peak memory ~1GB.
-
-        For each edge (src → dst): score = sigmoid(W · [src_feat || dst_feat])
-        Then aggregate: h_dst = sum(score * h_src) / sum(score)
+        Mean-aggregate neighbour features for each node.
+        Fast O(E) scatter operation — no intermediate edge tensors.
         """
         if edge_index.numel() == 0:
             return x
-        src, dst   = edge_index
-        n          = x.size(0)
-        agg        = torch.zeros_like(x)
-        attn_sum   = torch.zeros(n, device=x.device)
-
-        for start in range(0, src.size(0), chunk_size):
-            end   = min(start + chunk_size, src.size(0))
-            s, d  = src[start:end], dst[start:end]
-            score = torch.sigmoid(
-                attn_linear(torch.cat([x[s], x[d]], dim=-1)).squeeze(-1)
-            )
-            agg.index_add_(0, d, x[s] * score.unsqueeze(1))
-            attn_sum.index_add_(0, d, score)
-            del score
-
-        return agg / attn_sum.clamp_min(1e-6).unsqueeze(1)
+        src, dst = edge_index
+        agg = torch.zeros_like(x)
+        agg.index_add_(0, dst, x[src])
+        deg = torch.zeros(x.size(0), device=x.device).index_add_(
+            0, dst, torch.ones(len(dst), device=x.device)
+        ).clamp_min(1.0).unsqueeze(1)
+        return agg / deg
 
     def forward(self, x_num, x_cat, edge_index):
         # Encode features into a shared embedding space
@@ -1061,12 +1040,12 @@ class SimpleGNN(nn.Module):
         )
         h = self.act(self.input_linear(h))
 
-        # Three residual attention-aggregation layers
-        for gcn, norm, attn in [(self.gcn1, self.norm1, self.attn1),
-                                 (self.gcn2, self.norm2, self.attn2),
-                                 (self.gcn3, self.norm3, self.attn3)]:
+        # Three residual message-passing layers
+        for gcn, norm in [(self.gcn1, self.norm1),
+                          (self.gcn2, self.norm2),
+                          (self.gcn3, self.norm3)]:
             h_res = h
-            h     = self.dropout(self.act(gcn(self._attn_agg(h, edge_index, attn))))
+            h     = self.dropout(self.act(gcn(self._mean_agg(h, edge_index))))
             h     = norm(h + h_res)
 
         return self.out_linear(h).squeeze(-1)\
@@ -1083,7 +1062,7 @@ Key differences from TabTransformer training:
 """),
     cc('''\
 def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
-              num_epochs=250, lr=1e-3, train_idx=None, val_idx=None,
+              num_epochs=100, lr=1e-3, train_idx=None, val_idx=None,
               test_idx=None, early_stopping_patience=20):
     """
     Full-graph training of the SimpleGNN.
@@ -1136,7 +1115,10 @@ def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
     x_num, x_cat, y, ei = x_num.to(device), x_cat.to(device), y.to(device), ei.to(device)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = SimpleGNN(len(numeric_cols), cat_sizes).to(device)
+    # hidden_dim=128 (down from 256) — halves memory, ~2x faster per epoch,
+    # modest accuracy tradeoff. At 590k nodes the graph structure does the
+    # heavy lifting, not model capacity.
+    model = SimpleGNN(len(numeric_cols), cat_sizes, hidden_dim=128).to(device)
     pos   = (y[tr] == 1).sum(); neg = (y[tr] == 0).sum()
     criterion = nn.BCEWithLogitsLoss(pos_weight=(neg / pos).clamp(min=1.0))
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -1216,8 +1198,8 @@ def train_gnn(df, numeric_cols, categorical_cols, target_col="isFraud",
     mc("## 9 · Run Training"),
     cc('''\
 # NOTE: Building the graph takes ~2-3 minutes.
-# Training is ~13 sec/epoch on CPU — early stopping will stop before epoch 250
-# once val PR-AUC plateaus (typically around epoch 150-200).
+# Training is ~5 sec/epoch on CUDA with hidden_dim=128.
+# 100 epochs max; early stopping (patience=20) will likely stop around epoch 60-80.
 print("Building graph …")
 edge_index = build_transaction_graph(df)
 print(f"Graph built: {edge_index.shape[1]:,} edges")
