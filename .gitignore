@@ -7,3 +7,14 @@ saved_models/
 lightning_logs/
 *.csv
 .pt_tmp/exp_version_manager.yml
+
+# Diagram generation scripts and outputs — not part of the repo
+generate_diagrams.py
+generate_poster.py
+diagram_*.png
+table_*.png
+diagram_*.pdf
+plot_*.png
+plot_*.pdf
+poster_*.png
+poster_*.pdf
